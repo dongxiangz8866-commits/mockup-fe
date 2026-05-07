@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { TEX_H, TEX_W, markTextureDirty, sharedCtx } from './textureStore';
+import {
+  TEX_H,
+  TEX_W,
+  markTextureDirty,
+  sharedCtx,
+  photoPatternCtx,
+  PHOTO_PATTERN_W,
+  PHOTO_PATTERN_H,
+  setPatternRelBox,
+} from './textureStore';
 import { loadUvOutline, type UvOutline } from './uvOutline';
 
 const MODEL_URL = '/sweatshirt.glb';
-const DISPLAY_W = 480;
-const DISPLAY_H = 540;
+const DISPLAY_W = 380;
+const DISPLAY_H = 320;
 
 const PRINT_W_CM = 30;
 const PRINT_H_CM = 35;
@@ -18,6 +27,41 @@ const FOCUS_BOUNDS = { minU: 0.020, maxU: 0.314, minV: 0.020, maxV: 0.285 };
 
 const UV_ANISOTROPY = 1.32;
 const SNAP_THRESHOLD_UV = 0.003;
+
+const PATTERN_CACHE_KEY = 'pattern-cache:v1';
+type PatternCache = { dataUrl: string; box: Box };
+
+function loadPatternCache(): PatternCache | null {
+  try {
+    const raw = localStorage.getItem(PATTERN_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      typeof parsed?.dataUrl !== 'string' ||
+      typeof parsed?.box?.u !== 'number'
+    )
+      return null;
+    return parsed as PatternCache;
+  } catch {
+    return null;
+  }
+}
+
+function savePatternCache(c: PatternCache) {
+  try {
+    localStorage.setItem(PATTERN_CACHE_KEY, JSON.stringify(c));
+  } catch {
+    // quota — ignore
+  }
+}
+
+function imageToDataUrl(img: HTMLImageElement): string {
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth;
+  c.height = img.naturalHeight;
+  c.getContext('2d')!.drawImage(img, 0, 0);
+  return c.toDataURL('image/png');
+}
 
 type Box = { u: number; v: number; w: number; h: number };
 type DragMode =
@@ -86,16 +130,19 @@ function snapToCenter(b: Box): { box: Box; snap: SnapState } {
 function paintTexture(img: HTMLImageElement | null, box: Box | null) {
   sharedCtx.fillStyle = '#ffffff';
   sharedCtx.fillRect(0, 0, TEX_W, TEX_H);
+  photoPatternCtx.fillStyle = '#ffffff';
+  photoPatternCtx.fillRect(0, 0, PHOTO_PATTERN_W, PHOTO_PATTERN_H);
   if (!img || !box || !img.complete || img.naturalWidth === 0) {
+    setPatternRelBox(null);
     markTextureDirty();
     return;
   }
+
   const tx = box.u * TEX_W;
   const tw = box.w * TEX_W;
   const thRaw = box.h * TEX_H;
   const th = thRaw / UV_ANISOTROPY;
   const ty = box.v * TEX_H + (thRaw - th) / 2;
-
   const clipX = PRINT_U * TEX_W;
   const clipY = PRINT_V * TEX_H;
   const clipW = PRINT_W_UV * TEX_W;
@@ -109,6 +156,27 @@ function paintTexture(img: HTMLImageElement | null, box: Box | null) {
   sharedCtx.imageSmoothingQuality = 'high';
   sharedCtx.drawImage(img, tx, ty, tw, th);
   sharedCtx.restore();
+
+  const relU = (box.u - PRINT_U) / PRINT_W_UV;
+  const relV = (box.v - PRINT_V) / PRINT_H_UV;
+  const relW = box.w / PRINT_W_UV;
+  const relH = box.h / PRINT_H_UV;
+  setPatternRelBox({ u: relU, v: relV, w: relW, h: relH });
+  photoPatternCtx.save();
+  photoPatternCtx.beginPath();
+  photoPatternCtx.rect(0, 0, PHOTO_PATTERN_W, PHOTO_PATTERN_H);
+  photoPatternCtx.clip();
+  photoPatternCtx.imageSmoothingEnabled = true;
+  photoPatternCtx.imageSmoothingQuality = 'high';
+  photoPatternCtx.drawImage(
+    img,
+    relU * PHOTO_PATTERN_W,
+    relV * PHOTO_PATTERN_H,
+    relW * PHOTO_PATTERN_W,
+    relH * PHOTO_PATTERN_H
+  );
+  photoPatternCtx.restore();
+
   markTextureDirty();
 }
 
@@ -131,6 +199,7 @@ export default function Editor2D() {
   const ratioRef = useRef<number>(1);
   const dragRef = useRef<DragMode>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadUvOutline(MODEL_URL).then(setOutline).catch((e) => {
@@ -139,22 +208,41 @@ export default function Editor2D() {
   }, []);
 
   useEffect(() => {
-    paintTexture(imgRef.current, box);
-  }, [box, imgUrl]);
-
-  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    const url = URL.createObjectURL(f);
+    const cached = loadPatternCache();
+    if (!cached) return;
     const img = new Image();
     img.onload = () => {
       const ratio = img.naturalWidth / img.naturalHeight;
       ratioRef.current = ratio;
       imgRef.current = img;
-      setImgUrl(url);
+      setImgUrl(cached.dataUrl);
+      setBox(cached.box);
+    };
+    img.src = cached.dataUrl;
+  }, []);
+
+  useEffect(() => {
+    paintTexture(imgRef.current, box);
+    if (imgUrl && box) {
+      savePatternCache({ dataUrl: imgUrl, box });
+    }
+  }, [box, imgUrl]);
+
+  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const blobUrl = URL.createObjectURL(f);
+    const img = new Image();
+    img.onload = () => {
+      const ratio = img.naturalWidth / img.naturalHeight;
+      ratioRef.current = ratio;
+      imgRef.current = img;
+      const dataUrl = imageToDataUrl(img);
+      URL.revokeObjectURL(blobUrl);
+      setImgUrl(dataUrl);
       setBox(fitBox(ratio));
     };
-    img.src = url;
+    img.src = blobUrl;
   };
 
   const reset = () => {
@@ -240,16 +328,24 @@ export default function Editor2D() {
     : 0;
   const dpiTier = dpiW >= 200 ? 'good' : dpiW >= 100 ? 'warn' : 'bad';
 
+  const onStageClick = (e: React.MouseEvent) => {
+    if (
+      (e.target as HTMLElement).closest('.pattern-box, .stage-icon')
+    )
+      return;
+    fileInputRef.current?.click();
+  };
+
   return (
     <div className="editor-root">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={onFile}
+        hidden
+      />
       <div className="editor-toolbar">
-        <label className="upload-btn">
-          上传图案
-          <input type="file" accept="image/*" onChange={onFile} hidden />
-        </label>
-        <button onClick={reset} className="reset-btn" disabled={!imgUrl}>
-          重置位置
-        </button>
         {box && imgRef.current && (
           <span className={`dpi-badge dpi-${dpiTier}`}>
             {dpiW} DPI{' '}
@@ -269,7 +365,48 @@ export default function Editor2D() {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onClick={onStageClick}
       >
+        {imgUrl && (
+          <div className="stage-icons">
+            <button
+              className="stage-icon"
+              onClick={(e) => {
+                e.stopPropagation();
+                fileInputRef.current?.click();
+              }}
+              title="替换图案"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M12 3v13M7 8l5-5 5 5"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+            <button
+              className="stage-icon"
+              onClick={(e) => {
+                e.stopPropagation();
+                reset();
+              }}
+              title="重置位置"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M4 4v6h6M20 20v-6h-6M20 8a8 8 0 0 0-14-2M4 16a8 8 0 0 0 14 2"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
+        )}
         <svg
           width={DISPLAY_W}
           height={DISPLAY_H}
@@ -383,7 +520,7 @@ export default function Editor2D() {
 
         {!imgUrl && (
           <div className="empty-hint">
-            点击上方"上传图案"按钮选择 PNG / JPG
+            点击此处上传图案 (PNG / JPG)
           </div>
         )}
       </div>

@@ -5,6 +5,7 @@ import {
   useGLTF,
   Bounds,
   ContactShadows,
+  Center,
 } from '@react-three/drei';
 import * as THREE from 'three';
 import { sharedTexture } from './textureStore';
@@ -12,13 +13,13 @@ import { sharedTexture } from './textureStore';
 const MODEL_URL = '/sweatshirt.glb';
 useGLTF.preload(MODEL_URL);
 
-const VIEWS = {
-  front: { pos: [0, 0.35, 1.7] as const, label: '正面' },
-  back: { pos: [0, 0.35, -1.7] as const, label: '背面' },
-  left: { pos: [-1.7, 0.35, 0.2] as const, label: '左袖' },
-  right: { pos: [1.7, 0.35, 0.2] as const, label: '右袖' },
+const VIEW_DIRS = {
+  front: { dir: [0, 0.18, 1] as const, label: '正面' },
+  back: { dir: [0, 0.18, -1] as const, label: '背面' },
+  left: { dir: [-1, 0.18, 0.1] as const, label: '左袖' },
+  right: { dir: [1, 0.18, 0.1] as const, label: '右袖' },
 };
-type ViewKey = keyof typeof VIEWS;
+type ViewKey = keyof typeof VIEW_DIRS;
 
 function Sweatshirt() {
   const { scene } = useGLTF(MODEL_URL) as unknown as { scene: THREE.Group };
@@ -56,13 +57,18 @@ function CameraRig({ view }: { view: ViewKey }) {
     | null;
 
   useEffect(() => {
-    const [x, y, z] = VIEWS[view].pos;
-    camera.position.set(x, y, z);
-    camera.lookAt(0, 0, 0);
-    if (controls) {
-      controls.target.set(0, 0, 0);
-      controls.update();
-    }
+    if (!controls) return;
+    const target = controls.target;
+    const distance = camera.position.distanceTo(target);
+    const [dx, dy, dz] = VIEW_DIRS[view].dir;
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    camera.position.set(
+      target.x + (dx / len) * distance,
+      target.y + (dy / len) * distance,
+      target.z + (dz / len) * distance
+    );
+    camera.lookAt(target);
+    controls.update();
   }, [view, camera, controls]);
 
   return null;
@@ -73,23 +79,8 @@ export default function Viewer3D() {
 
   return (
     <div className="viewer-root">
-      <div className="view-selector">
-        {(Object.keys(VIEWS) as ViewKey[]).map((v) => (
-          <button
-            key={v}
-            className={`view-btn ${view === v ? 'active' : ''}`}
-            onClick={() => setView(v)}
-          >
-            {VIEWS[v].label}
-          </button>
-        ))}
-      </div>
-
       <Canvas
-        camera={{
-          position: [VIEWS.front.pos[0], VIEWS.front.pos[1], VIEWS.front.pos[2]],
-          fov: 30,
-        }}
+        camera={{ position: [0, 0.18, 1.7], fov: 30 }}
         dpr={[1.5, 3]}
         gl={{
           toneMapping: THREE.NoToneMapping,
@@ -105,12 +96,14 @@ export default function Viewer3D() {
         <directionalLight position={[-3, 2, 2]} intensity={0.45} />
         <directionalLight position={[0, -2, 3]} intensity={0.25} />
         <Suspense fallback={null}>
-          <Bounds fit clip observe margin={1.05}>
-            <Sweatshirt />
+          <Bounds fit clip observe margin={1.15}>
+            <Center>
+              <Sweatshirt />
+            </Center>
           </Bounds>
           <ContactShadows
             position={[0, -0.62, 0]}
-            opacity={0.25}
+            opacity={0.22}
             blur={3}
             far={1.2}
             scale={3.5}
@@ -119,6 +112,18 @@ export default function Viewer3D() {
         <CameraRig view={view} />
         <OrbitControls makeDefault enableDamping enablePan={false} />
       </Canvas>
+
+      <div className="view-selector">
+        {(Object.keys(VIEW_DIRS) as ViewKey[]).map((v) => (
+          <button
+            key={v}
+            className={`view-btn ${view === v ? 'active' : ''}`}
+            onClick={() => setView(v)}
+          >
+            {VIEW_DIRS[v].label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

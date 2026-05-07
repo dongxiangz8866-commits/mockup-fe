@@ -7,6 +7,10 @@ app/build/
 
 # Vite cache
 **/.vite/
+.pnpm-store/
+*.tsbuildinfo
+app/vite.config.d.ts
+app/vite.config.js
 
 # Editor / OS
 .DS_Store
