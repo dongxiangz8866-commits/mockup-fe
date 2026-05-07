@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mockup-3d",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "app", "dev"],
+      "port": 5174
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+app/dist/
+app/build/
+
+# Vite cache
+**/.vite/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Local env
+.env
+.env.local
+.env.*.local
+
+# Obsidian per-user state
+.obsidian/workspace.json
+.obsidian/workspaces.json
