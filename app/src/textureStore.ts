@@ -24,8 +24,18 @@ sharedTexture.generateMipmaps = true;
 // Source pattern image + its UV box. Real-model composite warps this image
 // directly onto the photo via a single affine — no intermediate downsampled
 // canvas — so source resolution survives all the way to the quad rasterization.
+//
+// `img` is CanvasImageSource (HTMLImageElement | ImageBitmap | …) so callers
+// can pass either the raw <img> or a pre-resized ImageBitmap — useful when
+// the source is low-res and was bicubic-upsampled via createImageBitmap with
+// resizeQuality:'high' (sharper than canvas's bilinear upsample).
 export type PatternBox = { u: number; v: number; w: number; h: number };
-export type PatternState = { img: HTMLImageElement; box: PatternBox } | null;
+export type PatternState = {
+  img: CanvasImageSource;
+  width: number;
+  height: number;
+  box: PatternBox;
+} | null;
 let pattern: PatternState = null;
 export const getPattern = (): PatternState => pattern;
 export const setPattern = (p: PatternState): void => {

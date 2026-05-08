@@ -369,8 +369,8 @@ function ModelComposite({
       tctx.lineTo(quad.bl.x, quad.bl.y);
       tctx.closePath();
       tctx.clip();
-      const W = pat.img.naturalWidth;
-      const H = pat.img.naturalHeight;
+      const W = pat.width;
+      const H = pat.height;
       const relU = (pat.box.u - PRINT_U) / PRINT_W_UV;
       const relV = (pat.box.v - PRINT_V) / PRINT_H_UV;
       const relW = pat.box.w / PRINT_W_UV;
@@ -392,24 +392,42 @@ function ModelComposite({
 
       // Step 2: composite onto the photo via createPattern + fill — fill
       // uses anti-aliased path rasterization, so the quad boundary is smooth.
+      // Step 2: alpha-composite the pattern over the shirt (source-over).
+      // Pattern's own alpha decides coverage — opaque white shows AS white,
+      // semi-transparent edges blend softly, transparent BG keeps shirt.
+      ctx.drawImage(tmp, 0, 0);
+
+      // Step 2.5: vacuum-fit. Bake the shirt's lighting (low-frequency
+      // gradient + mid-frequency folds) into the pattern by partial-
+      // multiplying the photo through the pattern alpha. Without this the
+      // pattern reads as a flat sticker — colors are right but it doesn't
+      // wrap the cloth.
+      //
+      // Why partial: full multiply would re-collapse white pattern pixels
+      // (white × white shirt = white, the bug we just fixed). globalAlpha
+      // attenuates the multiply uniformly:
+      //   white × shirt-fold(0.85) at α=0.5  →  0.5·0.85 + 0.5 = 0.925
+      //     → fold visibly darkens white, but white still reads as white
+      //   yellow × shirt-fold at α=0.5      →  yellow·0.925
+      //     → colors keep saturation, fold cm onto them
+      // The mask (source-in via tmp.alpha) limits the multiply to the
+      // pattern region; surrounding shirt already shows its own folds
+      // from the source photo and must stay untouched.
+      //
+      // foldStrength slider drives α directly so the user gets a smooth
+      // "no fit ↔ strong fit" axis. 0.5 (=foldStrength 1.0) is the default
+      // sweet spot.
+      const litCanvas = document.createElement('canvas');
+      litCanvas.width = cv.width;
+      litCanvas.height = cv.height;
+      const lctx = litCanvas.getContext('2d')!;
+      lctx.drawImage(tmp, 0, 0);
+      lctx.globalCompositeOperation = 'source-in';
+      lctx.drawImage(photo, 0, 0);
       ctx.save();
-      const patFill = ctx.createPattern(tmp, 'no-repeat');
-      if (patFill) {
-        // globalAlpha < 1 softens pure multiply: at 0.85 the pattern keeps
-        // most of its print-on-shirt feel but ~15% of the original photo
-        // bleeds through, which counters multiply's tendency to crush
-        // saturated pattern colors when they overlap fold-darkened cloth.
-        ctx.globalCompositeOperation = 'multiply';
-        ctx.globalAlpha = 0.85;
-        ctx.fillStyle = patFill;
-        ctx.beginPath();
-        ctx.moveTo(quad.tl.x, quad.tl.y);
-        ctx.lineTo(quad.tr.x, quad.tr.y);
-        ctx.lineTo(quad.br.x, quad.br.y);
-        ctx.lineTo(quad.bl.x, quad.bl.y);
-        ctx.closePath();
-        ctx.fill();
-      }
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.globalAlpha = Math.min(0.85, foldStrength * 0.5);
+      ctx.drawImage(litCanvas, 0, 0);
       ctx.restore();
 
       // Step 3: fold/weave overlay, masked to the pattern's actual alpha (NOT

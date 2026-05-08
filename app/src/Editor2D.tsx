@@ -66,6 +66,34 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+// Bicubic-equivalent upsample of a small source via createImageBitmap's
+// resizeQuality:'high'. Canvas drawImage is bilinear-only, so a 600px source
+// painted into a 2700px region of sharedCanvas gets visibly blurry. Pre-sizing
+// to ~2K with the browser's higher-quality resampler means subsequent
+// drawImage calls are at most a mild downsample → far less compounding blur.
+//
+// 2048 chosen as the long-side target: covers the 3D-texture print-region
+// width (~2700·U_scale ≈ 2495) closely without doubling memory for typical
+// 1-2 MP uploads. High-res sources (≥ 2048 long-side) skip the bitmap and
+// use the raw <img> — canvas's bilinear is fine for downsampling.
+const BITMAP_TARGET = 2048;
+async function prepareBitmap(
+  img: HTMLImageElement
+): Promise<ImageBitmap | null> {
+  const longSide = Math.max(img.naturalWidth, img.naturalHeight);
+  if (longSide >= BITMAP_TARGET) return null;
+  const factor = BITMAP_TARGET / longSide;
+  try {
+    return await createImageBitmap(img, {
+      resizeWidth: Math.round(img.naturalWidth * factor),
+      resizeHeight: Math.round(img.naturalHeight * factor),
+      resizeQuality: 'high',
+    });
+  } catch {
+    return null;
+  }
+}
+
 type Box = { u: number; v: number; w: number; h: number };
 type DragMode =
   | { kind: 'move'; offU: number; offV: number }
@@ -137,7 +165,11 @@ function snapToCenter(b: Box): { box: Box; snap: SnapState } {
   return { box: { ...b, u, v: vv }, snap: { v, h } };
 }
 
-function paintTexture(img: HTMLImageElement | null, box: Box | null) {
+function paintTexture(
+  img: HTMLImageElement | null,
+  bitmap: ImageBitmap | null,
+  box: Box | null
+) {
   sharedCtx.fillStyle = '#ffffff';
   sharedCtx.fillRect(0, 0, TEX_W, TEX_H);
   if (!img || !box || !img.complete || img.naturalWidth === 0) {
@@ -145,6 +177,11 @@ function paintTexture(img: HTMLImageElement | null, box: Box | null) {
     markTextureDirty();
     return;
   }
+  // Prefer the pre-upsampled bitmap when available (low-res source path);
+  // otherwise canvas bilinear from the raw <img> is fine.
+  const src: CanvasImageSource = bitmap ?? img;
+  const srcW = bitmap ? bitmap.width : img.naturalWidth;
+  const srcH = bitmap ? bitmap.height : img.naturalHeight;
 
   const texBox = {
     u: 1 - box.u - box.w,
@@ -182,7 +219,7 @@ function paintTexture(img: HTMLImageElement | null, box: Box | null) {
     ctx.save();
     ctx.translate(x + w, y);
     ctx.scale(-1, 1);
-    ctx.drawImage(img, 0, 0, w, h);
+    ctx.drawImage(src, 0, 0, w, h);
     ctx.restore();
   };
 
@@ -195,10 +232,11 @@ function paintTexture(img: HTMLImageElement | null, box: Box | null) {
   drawSharedTexture(sharedCtx, tx, ty, tw, th);
   sharedCtx.restore();
 
-  // Real-model path consumes the source image directly via getPattern() —
-  // no intermediate canvas downsample. ModelGrid does a single affine warp
-  // from the source image onto the photo's plate quad.
-  setPattern({ img, box });
+  // Real-model path consumes the source directly via getPattern() — no
+  // intermediate canvas downsample. ModelGrid does a single affine warp
+  // from this source onto the photo's plate quad. Pass the bitmap (when
+  // present) so the photo composite also benefits from the bicubic upsample.
+  setPattern({ img: src, width: srcW, height: srcH, box });
   markTextureDirty();
 }
 
@@ -233,11 +271,32 @@ export default function Editor2D() {
   const [box, setBox] = useState<Box | null>(null);
   const [imgUrl, setImgUrl] = useState<string | null>(null);
   const [snap, setSnap] = useState<SnapState>({ v: false, h: false });
+  // Bumped after the async createImageBitmap upgrade lands so paintTexture
+  // re-runs with the higher-quality source.
+  const [bitmapVer, setBitmapVer] = useState(0);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const bitmapRef = useRef<ImageBitmap | null>(null);
   const ratioRef = useRef<number>(1);
   const dragRef = useRef<DragMode>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Async-upgrade the source: kick off prepareBitmap, then if the source
+  // hasn't been replaced (race guard via imgRef identity), swap in the bitmap
+  // and bump bitmapVer so paintTexture repaints with the sharper resampler.
+  const upgradeBitmap = (img: HTMLImageElement) => {
+    bitmapRef.current?.close();
+    bitmapRef.current = null;
+    prepareBitmap(img).then((bm) => {
+      if (!bm) return;
+      if (imgRef.current !== img) {
+        bm.close();
+        return;
+      }
+      bitmapRef.current = bm;
+      setBitmapVer((v) => v + 1);
+    });
+  };
 
   useEffect(() => {
     const cached = loadPatternCache();
@@ -249,16 +308,18 @@ export default function Editor2D() {
       imgRef.current = img;
       setImgUrl(cached.dataUrl);
       setBox(cached.box);
+      upgradeBitmap(img);
     };
     img.src = cached.dataUrl;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    paintTexture(imgRef.current, box);
+    paintTexture(imgRef.current, bitmapRef.current, box);
     if (imgUrl && box) {
       savePatternCache({ dataUrl: imgUrl, box });
     }
-  }, [box, imgUrl]);
+  }, [box, imgUrl, bitmapVer]);
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -271,6 +332,7 @@ export default function Editor2D() {
       imgRef.current = img;
       setImgUrl(dataUrl);
       setBox(fitBox(ratio));
+      upgradeBitmap(img);
     };
     img.src = dataUrl;
   };

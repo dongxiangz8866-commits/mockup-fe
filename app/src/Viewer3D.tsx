@@ -103,7 +103,13 @@ export default function Viewer3D() {
         camera={{ position: [0, 0.18, 1.7], fov: 30 }}
         dpr={[1.5, 3]}
         gl={{
-          toneMapping: THREE.ACESFilmicToneMapping,
+          // ACESFilmic is built for HDR cinema — it desaturates highlights
+          // ("filmic" rolloff), making pure-yellow → cream and pure-white →
+          // off-white. For a mockup that just samples a texture under flat
+          // lighting we want the raw texture colors to come through, so use
+          // NoToneMapping. Switching this is the single biggest factor in
+          // print colors looking dimmer in 3D vs. the source PNG.
+          toneMapping: THREE.NoToneMapping,
           outputColorSpace: THREE.SRGBColorSpace,
           antialias: true,
           powerPreference: 'high-performance',
