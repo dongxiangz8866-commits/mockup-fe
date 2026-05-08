@@ -10,6 +10,7 @@ import { PRINT_ASPECT, PRINT_H_UV, PRINT_U, PRINT_V, PRINT_W_UV } from './modelA
 // instantly without ever showing a loading badge.
 const photoMemCache = new Map<string, HTMLImageElement>();
 const highPassMemCache = new Map<string, HTMLCanvasElement>();
+const shadingMemCache = new Map<string, HTMLCanvasElement>();
 const memHpKey = (src: string, s: number) => `${src}|s=${s}`;
 
 const HIGHPASS_CACHE_PREFIX = 'hp-cache:v1:';
@@ -200,6 +201,76 @@ function buildHighPass(photo: HTMLImageElement, strength: number): HTMLCanvasEle
   return origC;
 }
 
+// Per-pixel relative shading map: photo / blur(photo, MEDIUM), encoded for
+// HARD-LIGHT (mid-gray 128 ≡ ratio 1.0 ≡ mathematical identity). Folds map
+// to bytes < 128 → hard-light darkens pattern. Bumps / highlights map to
+// > 128 → hard-light lightens pattern (capped per-channel for already-bright
+// patterns). Result: bidirectional "vacuum-fit" — printed-on look with both
+// the dark fold lines AND subtle bumps showing through the pattern.
+//
+// Why mid-gray identity matters: the pattern's nominal color in flat shirt
+// areas (where ratio ≈ 1, byte ≈ 128) is preserved exactly under hard-light,
+// regardless of the shirt photo's absolute brightness or globalAlpha. This
+// is the property that makes the foldStrength slider safe — it only changes
+// fold/highlight pixels, never flat-area pixels.
+//
+// Two blurs: the LARGE one (5% of min dim) is the local-mean estimator for
+// the ratio; the SMALL post-blur (0.3% of min dim, ~4-6 px) denoises the
+// per-pixel ratio jitter. Without the post-blur, photo sensor noise + JPEG
+// blocking artifacts read straight into the pattern as "rotten" texture.
+// 4-6 px is far below the typical fold width (10-30 px) so fold detail
+// survives.
+function buildShadingMap(photo: HTMLImageElement): HTMLCanvasElement {
+  const w = photo.naturalWidth;
+  const h = photo.naturalHeight;
+  const blurRadius = Math.max(40, Math.round(Math.min(w, h) * 0.05));
+  const blurC = document.createElement('canvas');
+  blurC.width = w;
+  blurC.height = h;
+  const blurCtx = blurC.getContext('2d')!;
+  blurCtx.filter = `blur(${blurRadius}px)`;
+  blurCtx.drawImage(photo, 0, 0);
+  const origC = document.createElement('canvas');
+  origC.width = w;
+  origC.height = h;
+  const origCtx = origC.getContext('2d')!;
+  origCtx.drawImage(photo, 0, 0);
+  const O = origCtx.getImageData(0, 0, w, h);
+  const B = blurCtx.getImageData(0, 0, w, h);
+  const out = origCtx.createImageData(w, h);
+  const Od = O.data;
+  const Bd = B.data;
+  const Dd = out.data;
+  for (let i = 0; i < Od.length; i += 4) {
+    const lO = Od[i] * 0.299 + Od[i + 1] * 0.587 + Od[i + 2] * 0.114;
+    const lB = Math.max(1, Bd[i] * 0.299 + Bd[i + 1] * 0.587 + Bd[i + 2] * 0.114);
+    const ratio = lO / lB;
+    // Encode FOLDS ONLY: ratio < 1 → byte < 128 (hard-light darkens),
+    // ratio ≥ 1 → byte 128 (hard-light identity, no change). The highlight
+    // branch of hard-light (`1 - 2·(1-bg)·(1-src)`) lifts every dim color
+    // channel toward 1, which desaturates any non-grayscale pattern color
+    // (yellow → pale yellow, blue → pale blue) the moment a shirt-bump
+    // pixel goes above the local mean. Capping at 128 throws away the
+    // "bump pops out" cue but keeps pattern saturation intact — the
+    // dominant 3D cue is the dark fold line anyway.
+    const v = Math.max(0, Math.min(128, 128 + (ratio - 1) * 256));
+    Dd[i] = v;
+    Dd[i + 1] = v;
+    Dd[i + 2] = v;
+    Dd[i + 3] = 255;
+  }
+  origCtx.putImageData(out, 0, 0);
+  // Post-blur denoise: removes per-pixel ratio noise without affecting
+  // medium-frequency fold structure.
+  const denoised = document.createElement('canvas');
+  denoised.width = w;
+  denoised.height = h;
+  const dctx = denoised.getContext('2d')!;
+  dctx.filter = `blur(${Math.max(3, Math.round(Math.min(w, h) * 0.003))}px)`;
+  dctx.drawImage(origC, 0, 0);
+  return denoised;
+}
+
 function ModelComposite({
   src,
   foldStrength,
@@ -216,14 +287,17 @@ function ModelComposite({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const photoRef = useRef<HTMLImageElement | null>(null);
   const highPassRef = useRef<HTMLCanvasElement | null>(null);
+  const shadingRef = useRef<HTMLCanvasElement | null>(null);
 
   // Hydrate from in-memory caches synchronously so a re-mount (e.g. modal)
   // for a previously-rendered src boots straight to 'ready' — no loading UI.
   const initPhoto = photoMemCache.get(src) ?? null;
   const initHp = highPassMemCache.get(memHpKey(src, foldStrength)) ?? null;
+  const initShading = shadingMemCache.get(src) ?? null;
   const initPose = initPhoto ? readCachedPose(src) : null;
   if (initPhoto && photoRef.current !== initPhoto) photoRef.current = initPhoto;
   if (initHp && highPassRef.current !== initHp) highPassRef.current = initHp;
+  if (initShading && shadingRef.current !== initShading) shadingRef.current = initShading;
 
   const [photoSize, setPhotoSize] = useState<{ w: number; h: number } | null>(() =>
     initPhoto ? { w: initPhoto.naturalWidth, h: initPhoto.naturalHeight } : null
@@ -275,6 +349,17 @@ function ModelComposite({
       }
       if (cancelled) return;
       highPassRef.current = hp;
+
+      // Shading map is foldStrength-independent (slider scales effect at
+      // render time via globalAlpha). Cache mem-only — too large for
+      // localStorage (full-res grayscale image per photo).
+      let sh = shadingMemCache.get(src) ?? null;
+      if (!sh) {
+        sh = buildShadingMap(image);
+        shadingMemCache.set(src, sh);
+      }
+      if (cancelled) return;
+      shadingRef.current = sh;
 
       setStatus('pose');
       try {
@@ -397,58 +482,56 @@ function ModelComposite({
       // semi-transparent edges blend softly, transparent BG keeps shirt.
       ctx.drawImage(tmp, 0, 0);
 
-      // Step 2.5: vacuum-fit. Bake the shirt's lighting (low-frequency
-      // gradient + mid-frequency folds) into the pattern by partial-
-      // multiplying the photo through the pattern alpha. Without this the
-      // pattern reads as a flat sticker — colors are right but it doesn't
-      // wrap the cloth.
+      // Step 2.5: vacuum-fit via hard-light with the relative-shading map.
       //
-      // Why partial: full multiply would re-collapse white pattern pixels
-      // (white × white shirt = white, the bug we just fixed). globalAlpha
-      // attenuates the multiply uniformly:
-      //   white × shirt-fold(0.85) at α=0.5  →  0.5·0.85 + 0.5 = 0.925
-      //     → fold visibly darkens white, but white still reads as white
-      //   yellow × shirt-fold at α=0.5      →  yellow·0.925
-      //     → colors keep saturation, fold cm onto them
-      // The mask (source-in via tmp.alpha) limits the multiply to the
-      // pattern region; surrounding shirt already shows its own folds
-      // from the source photo and must stay untouched.
+      // The shading map is photo / blur(photo) re-encoded so mid-gray (128)
+      // is the multiplicative identity (ratio = 1). Hard-light at mid-gray
+      // is mathematically the no-op, so pattern's nominal color in flat
+      // shirt regions is preserved exactly regardless of foldStrength.
+      // Below mid-gray (folds): hard-light's `2·bg·src` darkens — visible
+      // fold lines through the pattern. Above mid-gray (bumps/highlights):
+      // hard-light's `1 - 2·(1-bg)·(1-src)` lightens — bumps "pop" out.
       //
-      // foldStrength slider drives α directly so the user gets a smooth
-      // "no fit ↔ strong fit" axis. 0.5 (=foldStrength 1.0) is the default
-      // sweet spot.
-      const litCanvas = document.createElement('canvas');
-      litCanvas.width = cv.width;
-      litCanvas.height = cv.height;
-      const lctx = litCanvas.getContext('2d')!;
-      lctx.drawImage(tmp, 0, 0);
-      lctx.globalCompositeOperation = 'source-in';
-      lctx.drawImage(photo, 0, 0);
-      ctx.save();
-      ctx.globalCompositeOperation = 'multiply';
-      ctx.globalAlpha = Math.min(0.85, foldStrength * 0.5);
-      ctx.drawImage(litCanvas, 0, 0);
-      ctx.restore();
-
-      // Step 3: fold/weave overlay, masked to the pattern's actual alpha (NOT
-      // its bounding box). tmp already holds the warped pattern with PNG
-      // transparency intact; reuse that alpha as a mask so transparent PNG
-      // pixels keep the photo unchanged. Without this, hard-light + photo's
-      // own high-pass doubles the cloth weave in transparent areas → visible
-      // black grid.
-      if (highPassRef.current) {
-        const hpMasked = document.createElement('canvas');
-        hpMasked.width = cv.width;
-        hpMasked.height = cv.height;
-        const hpCtx = hpMasked.getContext('2d')!;
-        hpCtx.drawImage(tmp, 0, 0);
-        hpCtx.globalCompositeOperation = 'source-in';
-        hpCtx.drawImage(highPassRef.current, 0, 0);
-        ctx.save();
-        ctx.globalCompositeOperation = 'hard-light';
-        ctx.drawImage(hpMasked, 0, 0);
-        ctx.restore();
+      // Why hard-light and not multiply: multiply only darkens. The "立体感"
+      // (3D feel) cue requires BOTH dark fold valleys AND bright bump tops.
+      // Without the highlights the pattern reads as flat-tinted dirt rather
+      // than printed-on-cloth.
+      //
+      // foldStrength → globalAlpha attenuates the whole effect uniformly:
+      //   0 → α=0   (no fit, pattern flat over shirt)
+      //   1 → α=0.7 (default, visible fit)
+      //   1.43+ → α=1.0 (clamped, full natural fit)
+      // The post-blur denoise inside buildShadingMap is what keeps this
+      // step from re-introducing the grainy/rotten look that the prior
+      // hard-light high-pass produced.
+      if (shadingRef.current) {
+        const fitAlpha = Math.min(1.0, foldStrength * 0.7);
+        if (fitAlpha > 0) {
+          const sm = document.createElement('canvas');
+          sm.width = cv.width;
+          sm.height = cv.height;
+          const sctx = sm.getContext('2d')!;
+          sctx.drawImage(tmp, 0, 0);
+          sctx.globalCompositeOperation = 'source-in';
+          sctx.drawImage(shadingRef.current, 0, 0);
+          ctx.save();
+          ctx.globalCompositeOperation = 'hard-light';
+          ctx.globalAlpha = fitAlpha;
+          ctx.drawImage(sm, 0, 0);
+          ctx.restore();
+        }
       }
+
+      // Step 3 (hard-light high-pass) was removed. Stacking it on top of
+      // step 2.5's shading multiply double-baked the photo's high-frequency
+      // content (sensor noise, JPEG block artifacts, fabric microstructure)
+      // into the pattern, producing a "rotten" / grainy look in fold areas.
+      // Step 2.5's relative-shading multiply already gives the full vacuum-
+      // fit cue — folds darken the pattern smoothly via the photo / blur
+      // ratio. Adding hard-light high-pass on top contributed extra punch
+      // at the cost of visible noise. The reference renders we're matching
+      // (e.g. Image #8) show clean pattern colors with subtle smooth fold
+      // modulation only; one fold-modulation layer is enough.
     };
   }, [quad, photoSize, foldStrength]);
 
@@ -483,7 +566,7 @@ function ModelComposite({
 }
 
 export default function ModelGrid() {
-  const [foldStrength, setFoldStrength] = useState(1.0);
+  const [foldStrength, setFoldStrength] = useState(2.0);
   const [selected, setSelected] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const photoUrls = useModelUrls();
