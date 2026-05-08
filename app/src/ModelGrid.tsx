@@ -11,6 +11,7 @@ import { PRINT_ASPECT, PRINT_H_UV, PRINT_U, PRINT_V, PRINT_W_UV } from './modelA
 const photoMemCache = new Map<string, HTMLImageElement>();
 const highPassMemCache = new Map<string, HTMLCanvasElement>();
 const shadingMemCache = new Map<string, HTMLCanvasElement>();
+const highlightMemCache = new Map<string, HTMLCanvasElement>();
 const memHpKey = (src: string, s: number) => `${src}|s=${s}`;
 
 const HIGHPASS_CACHE_PREFIX = 'hp-cache:v1:';
@@ -271,6 +272,61 @@ function buildShadingMap(photo: HTMLImageElement): HTMLCanvasElement {
   return denoised;
 }
 
+// Highlight map for the SCREEN pass: encodes only strong bright bumps
+// (ratio > 1.05). Sub-threshold variations stay at byte 0 — screen identity —
+// so the pass doesn't desaturate flat or mildly-varying pattern regions.
+//
+// Why a separate canvas instead of expanding the shading map: hard-light's
+// highlight branch lifts every dim color channel toward 1, which washes
+// saturation on bright shirts (Image #6 etc). Screen, in contrast, preserves
+// the *ratio* of channels and only adds light proportional to (1 - bg), so
+// already-bright pattern pixels barely change while dark pattern pixels can
+// pick up some lift. Result: pattern "follows the light" of the shirt in
+// real bumps without recoloring flat areas.
+//
+// Scale 128 keeps even strong bumps (ratio 1.5) at byte ≈ 58, so combined
+// with a low globalAlpha the lift stays subtle.
+function buildHighlightMap(photo: HTMLImageElement): HTMLCanvasElement {
+  const w = photo.naturalWidth;
+  const h = photo.naturalHeight;
+  const blurRadius = Math.max(40, Math.round(Math.min(w, h) * 0.05));
+  const blurC = document.createElement('canvas');
+  blurC.width = w;
+  blurC.height = h;
+  const blurCtx = blurC.getContext('2d')!;
+  blurCtx.filter = `blur(${blurRadius}px)`;
+  blurCtx.drawImage(photo, 0, 0);
+  const origC = document.createElement('canvas');
+  origC.width = w;
+  origC.height = h;
+  const origCtx = origC.getContext('2d')!;
+  origCtx.drawImage(photo, 0, 0);
+  const O = origCtx.getImageData(0, 0, w, h);
+  const B = blurCtx.getImageData(0, 0, w, h);
+  const out = origCtx.createImageData(w, h);
+  const Od = O.data;
+  const Bd = B.data;
+  const Dd = out.data;
+  for (let i = 0; i < Od.length; i += 4) {
+    const lO = Od[i] * 0.299 + Od[i + 1] * 0.587 + Od[i + 2] * 0.114;
+    const lB = Math.max(1, Bd[i] * 0.299 + Bd[i + 1] * 0.587 + Bd[i + 2] * 0.114);
+    const ratio = lO / lB;
+    const v = Math.max(0, Math.min(255, (ratio - 1.05) * 128));
+    Dd[i] = v;
+    Dd[i + 1] = v;
+    Dd[i + 2] = v;
+    Dd[i + 3] = 255;
+  }
+  origCtx.putImageData(out, 0, 0);
+  const denoised = document.createElement('canvas');
+  denoised.width = w;
+  denoised.height = h;
+  const dctx = denoised.getContext('2d')!;
+  dctx.filter = `blur(${Math.max(3, Math.round(Math.min(w, h) * 0.003))}px)`;
+  dctx.drawImage(origC, 0, 0);
+  return denoised;
+}
+
 function ModelComposite({
   src,
   foldStrength,
@@ -288,16 +344,19 @@ function ModelComposite({
   const photoRef = useRef<HTMLImageElement | null>(null);
   const highPassRef = useRef<HTMLCanvasElement | null>(null);
   const shadingRef = useRef<HTMLCanvasElement | null>(null);
+  const highlightRef = useRef<HTMLCanvasElement | null>(null);
 
   // Hydrate from in-memory caches synchronously so a re-mount (e.g. modal)
   // for a previously-rendered src boots straight to 'ready' — no loading UI.
   const initPhoto = photoMemCache.get(src) ?? null;
   const initHp = highPassMemCache.get(memHpKey(src, foldStrength)) ?? null;
   const initShading = shadingMemCache.get(src) ?? null;
+  const initHighlight = highlightMemCache.get(src) ?? null;
   const initPose = initPhoto ? readCachedPose(src) : null;
   if (initPhoto && photoRef.current !== initPhoto) photoRef.current = initPhoto;
   if (initHp && highPassRef.current !== initHp) highPassRef.current = initHp;
   if (initShading && shadingRef.current !== initShading) shadingRef.current = initShading;
+  if (initHighlight && highlightRef.current !== initHighlight) highlightRef.current = initHighlight;
 
   const [photoSize, setPhotoSize] = useState<{ w: number; h: number } | null>(() =>
     initPhoto ? { w: initPhoto.naturalWidth, h: initPhoto.naturalHeight } : null
@@ -360,6 +419,14 @@ function ModelComposite({
       }
       if (cancelled) return;
       shadingRef.current = sh;
+
+      let hl = highlightMemCache.get(src) ?? null;
+      if (!hl) {
+        hl = buildHighlightMap(image);
+        highlightMemCache.set(src, hl);
+      }
+      if (cancelled) return;
+      highlightRef.current = hl;
 
       setStatus('pose');
       try {
@@ -518,6 +585,30 @@ function ModelComposite({
           ctx.globalCompositeOperation = 'hard-light';
           ctx.globalAlpha = fitAlpha;
           ctx.drawImage(sm, 0, 0);
+          ctx.restore();
+        }
+      }
+
+      // Step 2.6: weak screen highlight on strong bumps only. Pattern picks
+      // up the shirt's bright bumps via screen blend (additive lift bounded
+      // by 1-bg, so already-bright pattern pixels barely change). Threshold
+      // baked into the highlight map (ratio > 1.05) keeps flat / mildly
+      // varying regions at byte 0 = screen identity. Low globalAlpha keeps
+      // even strong bumps from washing saturation.
+      if (highlightRef.current) {
+        const hlAlpha = Math.min(0.35, foldStrength * 0.15);
+        if (hlAlpha > 0) {
+          const hm = document.createElement('canvas');
+          hm.width = cv.width;
+          hm.height = cv.height;
+          const hctx = hm.getContext('2d')!;
+          hctx.drawImage(tmp, 0, 0);
+          hctx.globalCompositeOperation = 'source-in';
+          hctx.drawImage(highlightRef.current, 0, 0);
+          ctx.save();
+          ctx.globalCompositeOperation = 'screen';
+          ctx.globalAlpha = hlAlpha;
+          ctx.drawImage(hm, 0, 0);
           ctx.restore();
         }
       }
