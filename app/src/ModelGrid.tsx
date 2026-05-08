@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { detectPoseCached, POSE_INDEX, type PoseLandmark } from './poseDetector';
-import { photoPatternCanvas, subscribePattern, getPatternRelBox } from './textureStore';
+import { photoPatternCanvas, subscribePattern } from './textureStore';
 import { PRINT_ASPECT, PRINT_V, PRINT_W_UV } from './modelAssets';
 
 const HIGHPASS_CACHE_PREFIX = 'hp-cache:v1:';
@@ -292,38 +292,23 @@ function ModelComposite({
       }
       ctx.restore();
 
-      // Step 3: high-pass overlay clipped to the pattern's sub-quad — same
-      // trick: fill an AA path with the high-pass canvas as the pattern.
-      const relBox = getPatternRelBox();
-      if (highPassRef.current && relBox) {
-        const bilerp = (u: number, v: number): Pt => {
-          const lx = quad.tl.x + (quad.bl.x - quad.tl.x) * v;
-          const ly = quad.tl.y + (quad.bl.y - quad.tl.y) * v;
-          const rx = quad.tr.x + (quad.br.x - quad.tr.x) * v;
-          const ry = quad.tr.y + (quad.br.y - quad.tr.y) * v;
-          return { x: lx + (rx - lx) * u, y: ly + (ry - ly) * u };
-        };
-        const u0 = relBox.u;
-        const v0 = relBox.v;
-        const u1 = relBox.u + relBox.w;
-        const v1 = relBox.v + relBox.h;
-        const sTL = bilerp(u0, v0);
-        const sTR = bilerp(u1, v0);
-        const sBR = bilerp(u1, v1);
-        const sBL = bilerp(u0, v1);
+      // Step 3: fold/weave overlay, masked to the pattern's actual alpha (NOT
+      // its bounding box). tmp already holds the warped pattern with PNG
+      // transparency intact; reuse that alpha as a mask so transparent PNG
+      // pixels keep the photo unchanged. Without this, hard-light + photo's
+      // own high-pass doubles the cloth weave in transparent areas → visible
+      // black grid.
+      if (highPassRef.current) {
+        const hpMasked = document.createElement('canvas');
+        hpMasked.width = cv.width;
+        hpMasked.height = cv.height;
+        const hpCtx = hpMasked.getContext('2d')!;
+        hpCtx.drawImage(tmp, 0, 0);
+        hpCtx.globalCompositeOperation = 'source-in';
+        hpCtx.drawImage(highPassRef.current, 0, 0);
         ctx.save();
-        const hpFill = ctx.createPattern(highPassRef.current, 'no-repeat');
-        if (hpFill) {
-          ctx.globalCompositeOperation = 'hard-light';
-          ctx.fillStyle = hpFill;
-          ctx.beginPath();
-          ctx.moveTo(sTL.x, sTL.y);
-          ctx.lineTo(sTR.x, sTR.y);
-          ctx.lineTo(sBR.x, sBR.y);
-          ctx.lineTo(sBL.x, sBL.y);
-          ctx.closePath();
-          ctx.fill();
-        }
+        ctx.globalCompositeOperation = 'hard-light';
+        ctx.drawImage(hpMasked, 0, 0);
         ctx.restore();
       }
     };

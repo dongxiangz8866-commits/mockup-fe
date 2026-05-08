@@ -41,15 +41,6 @@ export function subscribePattern(cb: () => void): () => void {
   };
 }
 
-export type PatternRelBox = { u: number; v: number; w: number; h: number };
-let patternRelBox: PatternRelBox | null = null;
-export function setPatternRelBox(b: PatternRelBox | null) {
-  patternRelBox = b;
-}
-export function getPatternRelBox(): PatternRelBox | null {
-  return patternRelBox;
-}
-
 export const markTextureDirty = () => {
   sharedTexture.needsUpdate = true;
   for (const l of listeners) l();
