@@ -21,8 +21,11 @@ sharedTexture.minFilter = THREE.LinearMipmapLinearFilter;
 sharedTexture.magFilter = THREE.LinearFilter;
 sharedTexture.generateMipmaps = true;
 
-export const PHOTO_PATTERN_W = 1024;
-export const PHOTO_PATTERN_H = Math.round((1024 * 35) / 30);
+// 2048-wide so the pattern stays sharp when warped onto large (4-5K) photos —
+// at 1024 the pattern was upsampled which softened the edges.
+// Aspect matches the print plate (16in × 18in = 40.64 × 45.72 cm).
+export const PHOTO_PATTERN_W = 2048;
+export const PHOTO_PATTERN_H = Math.round((2048 * 45.72) / 40.64);
 
 const photoCanvas = document.createElement('canvas');
 photoCanvas.width = PHOTO_PATTERN_W;

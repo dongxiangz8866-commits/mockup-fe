@@ -1,49 +1,69 @@
 import { Suspense, useEffect, useMemo, useState } from 'react';
-import { Canvas, useThree } from '@react-three/fiber';
-import {
-  OrbitControls,
-  useGLTF,
-  Bounds,
-  ContactShadows,
-  Center,
-} from '@react-three/drei';
+import { Canvas, useLoader, useThree } from '@react-three/fiber';
+import { OrbitControls, Bounds, Center } from '@react-three/drei';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three-stdlib';
 import { sharedTexture } from './textureStore';
-
-const MODEL_URL = '/sweatshirt.glb';
-useGLTF.preload(MODEL_URL);
+import {
+  FBX_FRONT_UV_BOUNDS,
+  FRONT_CLOTH_MESH,
+  SOURCE_MODEL_URL,
+} from './modelAssets';
 
 const VIEW_DIRS = {
-  front: { dir: [0, 0.18, 1] as const, label: '正面' },
-  back: { dir: [0, 0.18, -1] as const, label: '背面' },
-  left: { dir: [-1, 0.18, 0.1] as const, label: '左袖' },
-  right: { dir: [1, 0.18, 0.1] as const, label: '右袖' },
+  front: { dir: [0, 0.08, 1] as const, label: '正面' },
+  back: { dir: [0, 0.08, -1] as const, label: '背面' },
+  left: { dir: [-1, 0.08, 0.1] as const, label: '左袖' },
+  right: { dir: [1, 0.08, 0.1] as const, label: '右袖' },
 };
 type ViewKey = keyof typeof VIEW_DIRS;
 
-function Sweatshirt() {
-  const { scene } = useGLTF(MODEL_URL) as unknown as { scene: THREE.Group };
-  const cloned = useMemo(() => scene.clone(true), [scene]);
+function configureSharedTexture() {
+  const rangeU = FBX_FRONT_UV_BOUNDS.maxU - FBX_FRONT_UV_BOUNDS.minU;
+  const rangeV = FBX_FRONT_UV_BOUNDS.maxV - FBX_FRONT_UV_BOUNDS.minV;
+  sharedTexture.repeat.set(1 / rangeU, 1 / rangeV);
+  sharedTexture.offset.set(
+    -FBX_FRONT_UV_BOUNDS.minU / rangeU,
+    -FBX_FRONT_UV_BOUNDS.minV / rangeV
+  );
+  sharedTexture.wrapS = THREE.ClampToEdgeWrapping;
+  sharedTexture.wrapT = THREE.ClampToEdgeWrapping;
+  sharedTexture.needsUpdate = true;
+}
+
+function FbxGarmentModel() {
+  const gltf = useLoader(GLTFLoader, SOURCE_MODEL_URL);
+  const cloned = useMemo(() => gltf.scene.clone(true), [gltf]);
 
   useEffect(() => {
+    configureSharedTexture();
     cloned.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
       if (!mesh.isMesh) return;
-      const baseMat = mesh.material as
-        | THREE.MeshStandardMaterial
-        | THREE.MeshStandardMaterial[];
-      const apply = (m: THREE.MeshStandardMaterial) => {
-        const next = m.clone();
-        next.map = sharedTexture;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      const tuned = materials.map((material) => {
+        const base = material as THREE.MeshStandardMaterial | THREE.MeshPhongMaterial;
+        const next = base.clone() as THREE.MeshStandardMaterial | THREE.MeshPhongMaterial;
+        const map = (next as THREE.MeshStandardMaterial).map;
+        if (map) {
+          map.colorSpace = THREE.SRGBColorSpace;
+          map.needsUpdate = true;
+        }
+        next.side = THREE.DoubleSide;
+        // All cloth pieces are white. Front cloth additionally gets the
+        // shared print texture; the others stay flat white.
         next.color = new THREE.Color('#ffffff');
-        next.metalness = 0;
-        next.roughness = 0.85;
-        next.emissive = new THREE.Color('#000000');
-        next.emissiveMap = null;
+        if ('metalness' in next) next.metalness = 0;
+        if ('roughness' in next) next.roughness = 0.86;
+        if (mesh.name === FRONT_CLOTH_MESH) {
+          next.map = sharedTexture;
+        }
         next.needsUpdate = true;
         return next;
-      };
-      mesh.material = Array.isArray(baseMat) ? baseMat.map(apply) : apply(baseMat);
+      });
+      mesh.material = Array.isArray(mesh.material) ? tuned : tuned[0];
     });
   }, [cloned]);
 
@@ -83,31 +103,23 @@ export default function Viewer3D() {
         camera={{ position: [0, 0.18, 1.7], fov: 30 }}
         dpr={[1.5, 3]}
         gl={{
-          toneMapping: THREE.NoToneMapping,
+          toneMapping: THREE.ACESFilmicToneMapping,
           outputColorSpace: THREE.SRGBColorSpace,
           antialias: true,
           powerPreference: 'high-performance',
         }}
       >
-        <color attach="background" args={['#f5f6f8']} />
-        <ambientLight intensity={0.6} />
-        <hemisphereLight args={['#ffffff', '#d1d5db', 0.8]} />
-        <directionalLight position={[2, 4, 5]} intensity={0.85} />
-        <directionalLight position={[-3, 2, 2]} intensity={0.45} />
-        <directionalLight position={[0, -2, 3]} intensity={0.25} />
+        <color attach="background" args={['#ffffff']} />
+        <ambientLight intensity={0.9} />
+        <hemisphereLight args={['#ffffff', '#e5e7eb', 1.35]} />
+        <directionalLight position={[3, 4, 5]} intensity={1.2} />
+        <directionalLight position={[-4, 3, 2]} intensity={0.42} />
         <Suspense fallback={null}>
-          <Bounds fit clip observe margin={1.15}>
+          <Bounds fit clip observe margin={1.08}>
             <Center>
-              <Sweatshirt />
+              <FbxGarmentModel />
             </Center>
           </Bounds>
-          <ContactShadows
-            position={[0, -0.62, 0]}
-            opacity={0.22}
-            blur={3}
-            far={1.2}
-            scale={3.5}
-          />
         </Suspense>
         <CameraRig view={view} />
         <OrbitControls makeDefault enableDamping enablePan={false} />

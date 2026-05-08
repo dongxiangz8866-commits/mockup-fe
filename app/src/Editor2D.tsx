@@ -9,23 +9,21 @@ import {
   PHOTO_PATTERN_H,
   setPatternRelBox,
 } from './textureStore';
-import { loadUvOutline, type UvOutline } from './uvOutline';
+import {
+  EDITOR_V_FACTOR,
+  FOCUS_BOUNDS,
+  PRINT_H_CM,
+  PRINT_H_UV,
+  PRINT_U,
+  PRINT_V,
+  PRINT_W_CM,
+  PRINT_W_UV,
+} from './modelAssets';
+import { SHIRT_FRONT_NECK_PATH_D, SHIRT_OUTLINE_PATH_D } from './shirtOutline';
 
-const MODEL_URL = '/sweatshirt.glb';
 const DISPLAY_W = 380;
 const DISPLAY_H = 320;
 
-const PRINT_W_CM = 30;
-const PRINT_H_CM = 35;
-
-const PRINT_U = 0.097;
-const PRINT_V = 0.080;
-const PRINT_W_UV = 0.140;
-const PRINT_H_UV = 0.158;
-
-const FOCUS_BOUNDS = { minU: 0.020, maxU: 0.314, minV: 0.020, maxV: 0.285 };
-
-const UV_ANISOTROPY = 1.32;
 const SNAP_THRESHOLD_UV = 0.003;
 
 const PATTERN_CACHE_KEY = 'pattern-cache:v1';
@@ -72,7 +70,8 @@ type SnapState = { v: boolean; h: boolean };
 type Transform = {
   uMin: number;
   vMin: number;
-  scale: number;
+  scaleU: number;
+  scaleV: number;
   offX: number;
   offY: number;
 };
@@ -80,19 +79,25 @@ type Transform = {
 function computeTransform(): Transform {
   const uvW = FOCUS_BOUNDS.maxU - FOCUS_BOUNDS.minU;
   const uvH = FOCUS_BOUNDS.maxV - FOCUS_BOUNDS.minV;
-  const scale = Math.min(DISPLAY_W / uvW, DISPLAY_H / uvH);
-  const offX = (DISPLAY_W - uvW * scale) / 2;
-  const offY = (DISPLAY_H - uvH * scale) / 2;
-  return { uMin: FOCUS_BOUNDS.minU, vMin: FOCUS_BOUNDS.minV, scale, offX, offY };
+  const scaleU = Math.min(DISPLAY_W / uvW, DISPLAY_H / (uvH * EDITOR_V_FACTOR));
+  const scaleV = scaleU * EDITOR_V_FACTOR;
+  const offX = (DISPLAY_W - uvW * scaleU) / 2;
+  const offY = (DISPLAY_H - uvH * scaleV) / 2;
+  return { uMin: FOCUS_BOUNDS.minU, vMin: FOCUS_BOUNDS.minV, scaleU, scaleV, offX, offY };
 }
 
+// Convert source aspect (W/H px) to UV aspect (box.w / box.h) so the printed
+// pattern keeps the source's physical aspect on the cloth.
+const uvAspectFromSource = (ratio: number) => ratio * EDITOR_V_FACTOR;
+
 function fitBox(ratio: number): Box {
+  const uvAspect = uvAspectFromSource(ratio);
   const targetW = PRINT_W_UV * 0.85;
   let w = targetW;
-  let h = w / ratio;
+  let h = w / uvAspect;
   if (h > PRINT_H_UV * 0.85) {
     h = PRINT_H_UV * 0.85;
-    w = h * ratio;
+    w = h * uvAspect;
   }
   return {
     u: PRINT_U + (PRINT_W_UV - w) / 2,
@@ -138,15 +143,40 @@ function paintTexture(img: HTMLImageElement | null, box: Box | null) {
     return;
   }
 
-  const tx = box.u * TEX_W;
-  const tw = box.w * TEX_W;
-  const thRaw = box.h * TEX_H;
-  const th = thRaw / UV_ANISOTROPY;
-  const ty = box.v * TEX_H + (thRaw - th) / 2;
-  const clipX = PRINT_U * TEX_W;
+  const texBox = {
+    u: 1 - box.u - box.w,
+    v: box.v,
+    w: box.w,
+    h: box.h,
+  };
+  const texPrint = {
+    u: 1 - PRINT_U - PRINT_W_UV,
+    v: PRINT_V,
+    w: PRINT_W_UV,
+    h: PRINT_H_UV,
+  };
+  const tx = texBox.u * TEX_W;
+  const tw = texBox.w * TEX_W;
+  const th = texBox.h * TEX_H;
+  const ty = texBox.v * TEX_H;
+  const clipX = texPrint.u * TEX_W;
   const clipY = PRINT_V * TEX_H;
-  const clipW = PRINT_W_UV * TEX_W;
+  const clipW = texPrint.w * TEX_W;
   const clipH = PRINT_H_UV * TEX_H;
+
+  const drawSharedTexture = (
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number
+  ) => {
+    ctx.save();
+    ctx.translate(x + w, y);
+    ctx.scale(-1, 1);
+    ctx.drawImage(img, 0, 0, w, h);
+    ctx.restore();
+  };
 
   sharedCtx.save();
   sharedCtx.beginPath();
@@ -154,7 +184,7 @@ function paintTexture(img: HTMLImageElement | null, box: Box | null) {
   sharedCtx.clip();
   sharedCtx.imageSmoothingEnabled = true;
   sharedCtx.imageSmoothingQuality = 'high';
-  sharedCtx.drawImage(img, tx, ty, tw, th);
+  drawSharedTexture(sharedCtx, tx, ty, tw, th);
   sharedCtx.restore();
 
   const relU = (box.u - PRINT_U) / PRINT_W_UV;
@@ -190,8 +220,24 @@ function calcDpi(natural: number, uvDim: number, cm: number) {
   return Math.round(natural / inches);
 }
 
+function patternClipStyle(box: Box, xf: Transform): React.CSSProperties {
+  const boxX = (box.u - xf.uMin) * xf.scaleU + xf.offX;
+  const boxY = (box.v - xf.vMin) * xf.scaleV + xf.offY;
+  const boxW = box.w * xf.scaleU;
+  const boxH = box.h * xf.scaleV;
+  const printX = (PRINT_U - xf.uMin) * xf.scaleU + xf.offX;
+  const printY = (PRINT_V - xf.vMin) * xf.scaleV + xf.offY;
+  const printW = PRINT_W_UV * xf.scaleU;
+  const printH = PRINT_H_UV * xf.scaleV;
+
+  const left = Math.max(0, printX - boxX);
+  const top = Math.max(0, printY - boxY);
+  const right = Math.max(0, boxX + boxW - (printX + printW));
+  const bottom = Math.max(0, boxY + boxH - (printY + printH));
+  return { clipPath: `inset(${top}px ${right}px ${bottom}px ${left}px)` };
+}
+
 export default function Editor2D() {
-  const [outline, setOutline] = useState<UvOutline | null>(null);
   const [box, setBox] = useState<Box | null>(null);
   const [imgUrl, setImgUrl] = useState<string | null>(null);
   const [snap, setSnap] = useState<SnapState>({ v: false, h: false });
@@ -200,12 +246,6 @@ export default function Editor2D() {
   const dragRef = useRef<DragMode>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    loadUvOutline(MODEL_URL).then(setOutline).catch((e) => {
-      console.error('UV outline failed', e);
-    });
-  }, []);
 
   useEffect(() => {
     const cached = loadPatternCache();
@@ -257,8 +297,8 @@ export default function Editor2D() {
       const rect = stageRef.current.getBoundingClientRect();
       const px = e.clientX - rect.left;
       const py = e.clientY - rect.top;
-      const u = (px - xf.offX) / xf.scale + xf.uMin;
-      const v = (py - xf.offY) / xf.scale + xf.vMin;
+      const u = (px - xf.offX) / xf.scaleU + xf.uMin;
+      const v = (py - xf.offY) / xf.scaleV + xf.vMin;
 
       if (m.kind === 'move') {
         setBox((b) => {
@@ -272,14 +312,14 @@ export default function Editor2D() {
       }
 
       const o = m.orig;
-      const r = m.ratio;
+      const uvAspect = uvAspectFromSource(m.ratio);
       const corner = m.corner;
       const right = corner === 'se' || corner === 'ne';
       const bottom = corner === 'se' || corner === 'sw';
 
       let newW = right ? u - o.u : o.u + o.w - u;
-      newW = Math.max(0.005, Math.min(0.5, newW));
-      const newH = newW / r;
+      newW = Math.max(0.005, Math.min(0.95, newW));
+      const newH = newW / uvAspect;
       const nu = right ? o.u : o.u + o.w - newW;
       const nv = bottom ? o.v : o.v + o.h - newH;
       setBox(clampBoxToView({ u: nu, v: nv, w: newW, h: newH }));
@@ -292,33 +332,14 @@ export default function Editor2D() {
     setSnap({ v: false, h: false });
   };
 
-  if (!outline) {
-    return (
-      <div className="editor-root">
-        <div className="editor-loading">加载 UV 模板…</div>
-      </div>
-    );
-  }
-
   const xf = computeTransform();
-  const uvToX = (u: number) => xf.offX + (u - xf.uMin) * xf.scale;
-  const uvToY = (v: number) => xf.offY + (v - xf.vMin) * xf.scale;
-
-  const printCenterU = PRINT_U + PRINT_W_UV / 2;
-  const printCenterV = PRINT_V + PRINT_H_UV / 2;
-  const frontIsland = outline.islands.find(
-    (isl) =>
-      isl.uvBounds.minU <= printCenterU &&
-      printCenterU <= isl.uvBounds.maxU &&
-      isl.uvBounds.minV <= printCenterV &&
-      printCenterV <= isl.uvBounds.maxV
-  );
-  const islandPathD = frontIsland?.pathD ?? outline.pathD;
+  const uvToX = (u: number) => xf.offX + (u - xf.uMin) * xf.scaleU;
+  const uvToY = (v: number) => xf.offY + (v - xf.vMin) * xf.scaleV;
 
   const printX = uvToX(PRINT_U);
   const printY = uvToY(PRINT_V);
-  const printDispW = PRINT_W_UV * xf.scale;
-  const printDispH = PRINT_H_UV * xf.scale;
+  const printDispW = PRINT_W_UV * xf.scaleU;
+  const printDispH = PRINT_H_UV * xf.scaleV;
 
   const cx = printX + printDispW / 2;
   const cy = printY + printDispH / 2;
@@ -414,10 +435,11 @@ export default function Editor2D() {
           viewBox={`0 0 ${DISPLAY_W} ${DISPLAY_H}`}
         >
           <g
-            transform={`translate(${xf.offX - xf.uMin * xf.scale} ${xf.offY -
-              xf.vMin * xf.scale}) scale(${xf.scale})`}
+            transform={`translate(${xf.offX - xf.uMin * xf.scaleU} ${xf.offY -
+              xf.vMin * xf.scaleV}) scale(${xf.scaleU} ${xf.scaleV})`}
           >
-            <path d={islandPathD} className="uv-outline" vectorEffect="non-scaling-stroke" />
+            <path d={SHIRT_OUTLINE_PATH_D} className="uv-outline" vectorEffect="non-scaling-stroke" />
+            <path d={SHIRT_FRONT_NECK_PATH_D} className="uv-outline uv-neck" vectorEffect="non-scaling-stroke" />
           </g>
 
           <rect
@@ -476,10 +498,8 @@ export default function Editor2D() {
             style={{
               left: uvToX(box.u),
               top: uvToY(box.v),
-              width: box.w * xf.scale,
-              height: box.h * xf.scale,
-              backgroundImage: `url(${imgUrl})`,
-              backgroundSize: '100% 100%',
+              width: box.w * xf.scaleU,
+              height: box.h * xf.scaleV,
             }}
             onPointerDown={(e) => {
               if ((e.target as HTMLElement).classList.contains('handle')) return;
@@ -489,8 +509,8 @@ export default function Editor2D() {
               const stageRect = stageRef.current!.getBoundingClientRect();
               const px = e.clientX - stageRect.left;
               const py = e.clientY - stageRect.top;
-              const u = (px - xf.offX) / xf.scale + xf.uMin;
-              const v = (py - xf.offY) / xf.scale + xf.vMin;
+              const u = (px - xf.offX) / xf.scaleU + xf.uMin;
+              const v = (py - xf.offY) / xf.scaleV + xf.vMin;
               void r;
               dragRef.current = {
                 kind: 'move',
@@ -499,6 +519,13 @@ export default function Editor2D() {
               };
             }}
           >
+            <div
+              className="pattern-image"
+              style={{
+                ...patternClipStyle(box, xf),
+                backgroundImage: `url(${imgUrl})`,
+              }}
+            />
             {(['nw', 'ne', 'se', 'sw'] as const).map((c) => (
               <div
                 key={c}

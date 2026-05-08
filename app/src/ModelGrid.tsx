@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { detectPoseCached, POSE_INDEX, type PoseLandmark } from './poseDetector';
 import { photoPatternCanvas, subscribePattern, getPatternRelBox } from './textureStore';
+import { PRINT_H_UV, PRINT_V, PRINT_W_UV } from './modelAssets';
 
 const HIGHPASS_CACHE_PREFIX = 'hp-cache:v1:';
 
@@ -30,59 +31,94 @@ const PHOTO_URLS = __MODELS__.map((m) => `${m.url}?v=${m.mtime}`);
 type Pt = { x: number; y: number };
 type Quad = { tl: Pt; tr: Pt; br: Pt; bl: Pt };
 
+function lerpPt(a: Pt, b: Pt, t: number): Pt {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+// Calibration of MediaPipe landmarks against the cloth, in normalized
+// cloth-V units (V=0 at cloth top, V=1 at hem).
+//
+// MIDSHOULDER_CLOTH_V: MediaPipe's shoulder joints sit at the deltoid
+//   attachment, ~5-7 cm below the cloth's top corner (which is the shoulder
+//   seam). At cloth-center this is roughly the neckline level → V ≈ 0.10.
+// MIDHIP_CLOTH_V:      The hem extends below the hip joint by ~6-8 cm on a
+//   typical t-shirt → hip-joint at V ≈ 0.90.
+// SHOULDER_SPAN_OF_CLOTH_W: the cloth extends past the shoulder joints out
+//   to the sleeve attachment, so detected shoulder span is ~0.85× cloth W.
+//
+// To convert a cloth-V into the photo's shoulder→hip parametric t:
+//     t = (V - MIDSHOULDER_CLOTH_V) / (MIDHIP_CLOTH_V - MIDSHOULDER_CLOTH_V)
+//
+// The quad is a parallelogram (single width vector) so the pattern slides
+// cleanly with the body axis without weird perspective distortion on
+// slightly-turned subjects.
+const MIDSHOULDER_CLOTH_V = 0.10;
+const MIDHIP_CLOTH_V = 0.90;
+const SHOULDER_SPAN_OF_CLOTH_W = 0.85;
+
+const BODY_AXIS_CLOTH_V_RANGE = MIDHIP_CLOTH_V - MIDSHOULDER_CLOTH_V;
+const PRINT_TOP_T = (PRINT_V - MIDSHOULDER_CLOTH_V) / BODY_AXIS_CLOTH_V_RANGE;
+const PRINT_BOT_T =
+  (PRINT_V + PRINT_H_UV - MIDSHOULDER_CLOTH_V) / BODY_AXIS_CLOTH_V_RANGE;
+// Print width (cloth fraction) → fraction of shoulder span via calibration.
+// Drives off PRINT_W_UV so 3D / UV editor / photos all stay in sync.
+const PRINT_W_FRAC = PRINT_W_UV / SHOULDER_SPAN_OF_CLOTH_W;
+
 function quadFromLandmarks(lm: PoseLandmark[], w: number, h: number): Quad {
   const ls = lm[POSE_INDEX.leftShoulder];
   const rs = lm[POSE_INDEX.rightShoulder];
   const lh = lm[POSE_INDEX.leftHip];
   const rh = lm[POSE_INDEX.rightHip];
-  const px = (p: PoseLandmark) => p.x * w;
-  const py = (p: PoseLandmark) => p.y * h;
-  const insetX = 0.05;
-  const topT = 0.08;
-  const botT = 0.78;
-  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-  return {
-    tl: { x: lerp(px(rs), px(ls), insetX), y: lerp(py(rs), py(rh), topT) },
-    tr: { x: lerp(px(ls), px(rs), insetX), y: lerp(py(ls), py(lh), topT) },
-    br: { x: lerp(px(lh), px(rh), insetX), y: lerp(py(rs), py(rh), botT) },
-    bl: { x: lerp(px(rh), px(lh), insetX), y: lerp(py(ls), py(lh), botT) },
+  const toPt = (p: PoseLandmark): Pt => ({ x: p.x * w, y: p.y * h });
+  const leftShoulder = toPt(ls);   // subject's left  = viewer's right
+  const rightShoulder = toPt(rs);  // subject's right = viewer's left
+  const leftHip = toPt(lh);
+  const rightHip = toPt(rh);
+
+  const topMid: Pt = {
+    x: (leftShoulder.x + rightShoulder.x) / 2,
+    y: (leftShoulder.y + rightShoulder.y) / 2,
   };
-}
+  const botMid: Pt = {
+    x: (leftHip.x + rightHip.x) / 2,
+    y: (leftHip.y + rightHip.y) / 2,
+  };
 
-function affineTo(
-  ctx: CanvasRenderingContext2D,
-  s0: Pt, s1: Pt, s2: Pt,
-  d0: Pt, d1: Pt, d2: Pt
-): boolean {
-  const denom = (s1.x - s0.x) * (s2.y - s0.y) - (s2.x - s0.x) * (s1.y - s0.y);
-  if (Math.abs(denom) < 1e-6) return false;
-  const a = ((d1.x - d0.x) * (s2.y - s0.y) - (d2.x - d0.x) * (s1.y - s0.y)) / denom;
-  const c = ((s1.x - s0.x) * (d2.x - d0.x) - (s2.x - s0.x) * (d1.x - d0.x)) / denom;
-  const b = ((d1.y - d0.y) * (s2.y - s0.y) - (d2.y - d0.y) * (s1.y - s0.y)) / denom;
-  const d = ((s1.x - s0.x) * (d2.y - d0.y) - (s2.x - s0.x) * (d1.y - d0.y)) / denom;
-  const e = d0.x - a * s0.x - c * s0.y;
-  const f = d0.y - b * s0.x - d * s0.y;
-  ctx.transform(a, b, c, d, e, f);
-  return true;
-}
+  const printTop = lerpPt(topMid, botMid, PRINT_TOP_T);
+  const printBot = lerpPt(topMid, botMid, PRINT_BOT_T);
 
-function drawTriangle(
-  ctx: CanvasRenderingContext2D,
-  src: HTMLCanvasElement,
-  s0: Pt, s1: Pt, s2: Pt,
-  d0: Pt, d1: Pt, d2: Pt
-) {
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(d0.x, d0.y);
-  ctx.lineTo(d1.x, d1.y);
-  ctx.lineTo(d2.x, d2.y);
-  ctx.closePath();
-  ctx.clip();
-  if (affineTo(ctx, s0, s1, s2, d0, d1, d2)) {
-    ctx.drawImage(src, 0, 0);
-  }
-  ctx.restore();
+  // Width-direction angle = average of shoulder-line and hip-line angles
+  // (subject's-right → subject's-left). When both agree (real torso lean),
+  // the pattern follows the body. When they disagree (e.g., a raised arm
+  // tilts the shoulder line but not the hip line), averaging halves the
+  // spurious shoulder tilt instead of letting it run away. With both arms
+  // hanging naturally the two angles are ~0 and the pattern is upright.
+  const shoulderAngle = Math.atan2(
+    leftShoulder.y - rightShoulder.y,
+    leftShoulder.x - rightShoulder.x
+  );
+  const hipAngle = Math.atan2(
+    leftHip.y - rightHip.y,
+    leftHip.x - rightHip.x
+  );
+  const tiltAngle = (shoulderAngle + hipAngle) / 2;
+  // Magnitude from full Euclidean shoulder span (perspective-foreshortens
+  // correctly when the subject turns).
+  const shoulderLen = Math.hypot(
+    leftShoulder.x - rightShoulder.x,
+    leftShoulder.y - rightShoulder.y
+  );
+  const halfMag = shoulderLen * 0.5 * PRINT_W_FRAC;
+  const halfX = Math.cos(tiltAngle) * halfMag;
+  const halfY = Math.sin(tiltAngle) * halfMag;
+
+  // tl/bl on subject's-right side (viewer's image-left for front-facing).
+  return {
+    tl: { x: printTop.x - halfX, y: printTop.y - halfY },
+    tr: { x: printTop.x + halfX, y: printTop.y + halfY },
+    bl: { x: printBot.x - halfX, y: printBot.y - halfY },
+    br: { x: printBot.x + halfX, y: printBot.y + halfY },
+  };
 }
 
 function buildHighPass(photo: HTMLImageElement, strength: number): HTMLCanvasElement {
@@ -217,30 +253,46 @@ function ModelComposite({
       ctx.drawImage(photo, 0, 0);
       if (!quad) return;
 
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(quad.tl.x, quad.tl.y);
-      ctx.lineTo(quad.tr.x, quad.tr.y);
-      ctx.lineTo(quad.br.x, quad.br.y);
-      ctx.lineTo(quad.bl.x, quad.bl.y);
-      ctx.closePath();
-      ctx.clip();
-      ctx.globalCompositeOperation = 'multiply';
+      // Step 1: warp pattern into an off-screen canvas with a SINGLE affine
+      // transform. The quad is a true parallelogram (tr-tl = br-bl), so the
+      // mapping rectangle→parallelogram is exactly an affine — no triangle
+      // subdivision, no seams.
+      //   matrix maps (0,0)→tl, (pw,0)→tr, (0,ph)→bl  ⇒  br falls into place
+      const tmp = document.createElement('canvas');
+      tmp.width = cv.width;
+      tmp.height = cv.height;
+      const tctx = tmp.getContext('2d')!;
+      tctx.imageSmoothingEnabled = true;
+      tctx.imageSmoothingQuality = 'high';
       const pw = photoPatternCanvas.width;
       const ph = photoPatternCanvas.height;
-      const cQ: Pt = {
-        x: (quad.tl.x + quad.tr.x + quad.br.x + quad.bl.x) / 4,
-        y: (quad.tl.y + quad.tr.y + quad.br.y + quad.bl.y) / 4,
-      };
-      const cP: Pt = { x: pw / 2, y: ph / 2 };
-      const tlP: Pt = { x: 0, y: 0 };
-      const trP: Pt = { x: pw, y: 0 };
-      const brP: Pt = { x: pw, y: ph };
-      const blP: Pt = { x: 0, y: ph };
-      drawTriangle(ctx, photoPatternCanvas, tlP, trP, cP, quad.tl, quad.tr, cQ);
-      drawTriangle(ctx, photoPatternCanvas, trP, brP, cP, quad.tr, quad.br, cQ);
-      drawTriangle(ctx, photoPatternCanvas, brP, blP, cP, quad.br, quad.bl, cQ);
-      drawTriangle(ctx, photoPatternCanvas, blP, tlP, cP, quad.bl, quad.tl, cQ);
+      const ax = (quad.tr.x - quad.tl.x) / pw;
+      const ay = (quad.tr.y - quad.tl.y) / pw;
+      const bx = (quad.bl.x - quad.tl.x) / ph;
+      const by = (quad.bl.y - quad.tl.y) / ph;
+      tctx.setTransform(ax, ay, bx, by, quad.tl.x, quad.tl.y);
+      tctx.drawImage(photoPatternCanvas, 0, 0);
+      tctx.setTransform(1, 0, 0, 1, 0, 0);
+
+      // Step 2: composite onto the photo via createPattern + fill — fill
+      // uses anti-aliased path rasterization, so the quad boundary is smooth.
+      ctx.save();
+      const patFill = ctx.createPattern(tmp, 'no-repeat');
+      if (patFill) {
+        ctx.globalCompositeOperation = 'multiply';
+        ctx.fillStyle = patFill;
+        ctx.beginPath();
+        ctx.moveTo(quad.tl.x, quad.tl.y);
+        ctx.lineTo(quad.tr.x, quad.tr.y);
+        ctx.lineTo(quad.br.x, quad.br.y);
+        ctx.lineTo(quad.bl.x, quad.bl.y);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // Step 3: high-pass overlay clipped to the pattern's sub-quad — same
+      // trick: fill an AA path with the high-pass canvas as the pattern.
       const relBox = getPatternRelBox();
       if (highPassRef.current && relBox) {
         const bilerp = (u: number, v: number): Pt => {
@@ -259,18 +311,20 @@ function ModelComposite({
         const sBR = bilerp(u1, v1);
         const sBL = bilerp(u0, v1);
         ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(sTL.x, sTL.y);
-        ctx.lineTo(sTR.x, sTR.y);
-        ctx.lineTo(sBR.x, sBR.y);
-        ctx.lineTo(sBL.x, sBL.y);
-        ctx.closePath();
-        ctx.clip();
-        ctx.globalCompositeOperation = 'hard-light';
-        ctx.drawImage(highPassRef.current, 0, 0);
+        const hpFill = ctx.createPattern(highPassRef.current, 'no-repeat');
+        if (hpFill) {
+          ctx.globalCompositeOperation = 'hard-light';
+          ctx.fillStyle = hpFill;
+          ctx.beginPath();
+          ctx.moveTo(sTL.x, sTL.y);
+          ctx.lineTo(sTR.x, sTR.y);
+          ctx.lineTo(sBR.x, sBR.y);
+          ctx.lineTo(sBL.x, sBL.y);
+          ctx.closePath();
+          ctx.fill();
+        }
         ctx.restore();
       }
-      ctx.restore();
     };
   }, [quad, photoSize, foldStrength]);
 
