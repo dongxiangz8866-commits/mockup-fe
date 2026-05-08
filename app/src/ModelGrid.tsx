@@ -26,7 +26,41 @@ function saveCachedHighPass(key: string, canvas: HTMLCanvasElement): void {
   }
 }
 
-const PHOTO_URLS = __MODELS__.map((m) => `${m.url}?v=${m.mtime}`);
+type ModelEntry = { url: string; mtime: number };
+const toUrls = (list: ModelEntry[]) => list.map((m) => `${m.url}?v=${m.mtime}`);
+
+// Dev: poll /api/models so add/delete in /public/models reflects without
+// restarting Vite (build-time __MODELS__ is frozen at config load). The
+// dev plugin also broadcasts a custom HMR event on directory change.
+function useModelUrls(): string[] {
+  const [urls, setUrls] = useState<string[]>(() => toUrls(__MODELS__));
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const r = await fetch('/api/models');
+        if (!r.ok) return;
+        const list = (await r.json()) as ModelEntry[];
+        if (!cancelled) setUrls(toUrls(list));
+      } catch {
+        // ignore — keep last known list
+      }
+    };
+    refresh();
+    if (import.meta.hot) {
+      import.meta.hot.on('models-changed', refresh);
+      return () => {
+        cancelled = true;
+        import.meta.hot?.off('models-changed', refresh);
+      };
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return urls;
+}
 
 type Pt = { x: number; y: number };
 type Quad = { tl: Pt; tr: Pt; br: Pt; bl: Pt };
@@ -280,7 +314,12 @@ function ModelComposite({
       ctx.save();
       const patFill = ctx.createPattern(tmp, 'no-repeat');
       if (patFill) {
+        // globalAlpha < 1 softens pure multiply: at 0.85 the pattern keeps
+        // most of its print-on-shirt feel but ~15% of the original photo
+        // bleeds through, which counters multiply's tendency to crush
+        // saturated pattern colors when they overlap fold-darkened cloth.
         ctx.globalCompositeOperation = 'multiply';
+        ctx.globalAlpha = 0.85;
         ctx.fillStyle = patFill;
         ctx.beginPath();
         ctx.moveTo(quad.tl.x, quad.tl.y);
@@ -345,9 +384,10 @@ function ModelComposite({
 }
 
 export default function ModelGrid() {
-  const [foldStrength, setFoldStrength] = useState(1.5);
+  const [foldStrength, setFoldStrength] = useState(1.0);
   const [selected, setSelected] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
+  const photoUrls = useModelUrls();
 
   useEffect(() => {
     if (!selected) return;
@@ -382,7 +422,7 @@ export default function ModelGrid() {
         </div>
       </div>
       <div className="model-grid">
-        {PHOTO_URLS.map((url) => (
+        {photoUrls.map((url) => (
           <ModelComposite
             key={url}
             src={url}

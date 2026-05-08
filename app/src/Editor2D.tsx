@@ -11,6 +11,8 @@ import {
 import {
   EDITOR_V_FACTOR,
   FOCUS_BOUNDS,
+  GLB_TEX_SCALE_U,
+  GLB_TEX_SCALE_V,
   PRINT_H_CM,
   PRINT_H_UV,
   PRINT_U,
@@ -52,12 +54,18 @@ function savePatternCache(c: PatternCache) {
   }
 }
 
-function imageToDataUrl(img: HTMLImageElement): string {
-  const c = document.createElement('canvas');
-  c.width = img.naturalWidth;
-  c.height = img.naturalHeight;
-  c.getContext('2d')!.drawImage(img, 0, 0);
-  return c.toDataURL('image/png');
+// Read the file's raw bytes as a data URL. NOT going through canvas →
+// toDataURL('image/png'), because that path forces a sRGB re-encode and
+// silently desaturates Display-P3 / wide-gamut PNGs (which most phone /
+// AI-generated images now are) — visible as "colors went darker right after
+// upload" in the editor preview.
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 type Box = { u: number; v: number; w: number; h: number };
@@ -155,14 +163,19 @@ function paintTexture(img: HTMLImageElement | null, box: Box | null) {
     w: PRINT_W_UV,
     h: PRINT_H_UV,
   };
-  const tx = texBox.u * TEX_W;
-  const tw = texBox.w * TEX_W;
-  const th = texBox.h * TEX_H;
-  const ty = texBox.v * TEX_H;
-  const clipX = texPrint.u * TEX_W;
-  const clipY = PRINT_V * TEX_H;
-  const clipW = texPrint.w * TEX_W;
-  const clipH = PRINT_H_UV * TEX_H;
+  // Apply GLB UV anisotropy correction so the print plate (and pattern) end
+  // up at correct physical cm on the 3D mesh. Anchor: cloth horizontal center
+  // (canvas U = TEX_W/2) for U; cloth top (canvas V = 0) for V.
+  const sx = (x: number) => (x - TEX_W / 2) * GLB_TEX_SCALE_U + TEX_W / 2;
+  const sy = (y: number) => y * GLB_TEX_SCALE_V;
+  const tx = sx(texBox.u * TEX_W);
+  const tw = texBox.w * TEX_W * GLB_TEX_SCALE_U;
+  const th = texBox.h * TEX_H * GLB_TEX_SCALE_V;
+  const ty = sy(texBox.v * TEX_H);
+  const clipX = sx(texPrint.u * TEX_W);
+  const clipY = sy(PRINT_V * TEX_H);
+  const clipW = texPrint.w * TEX_W * GLB_TEX_SCALE_U;
+  const clipH = PRINT_H_UV * TEX_H * GLB_TEX_SCALE_V;
 
   const drawSharedTexture = (
     ctx: CanvasRenderingContext2D,
@@ -267,21 +280,19 @@ export default function Editor2D() {
     }
   }, [box, imgUrl]);
 
-  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    const blobUrl = URL.createObjectURL(f);
+    const dataUrl = await fileToDataUrl(f);
     const img = new Image();
     img.onload = () => {
       const ratio = img.naturalWidth / img.naturalHeight;
       ratioRef.current = ratio;
       imgRef.current = img;
-      const dataUrl = imageToDataUrl(img);
-      URL.revokeObjectURL(blobUrl);
       setImgUrl(dataUrl);
       setBox(fitBox(ratio));
     };
-    img.src = blobUrl;
+    img.src = dataUrl;
   };
 
   const reset = () => {

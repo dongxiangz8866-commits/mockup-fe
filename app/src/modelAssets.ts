@@ -44,8 +44,12 @@ export const EDITOR_V_FACTOR = CLOTH_H_CM / CLOTH_W_CM;
 // Print plate spec (Memebuy 白坯尺寸表, 男T TEE001):
 //   front 正面: 领下 5 cm, height 18 in (45.72 cm), width 16 in (40.64 cm)
 // Pattern is fixed-physical-size, independent of garment size.
+//
+// Effective printable height is 5 cm shorter than the spec — the top 5 cm
+// of the plate is reserved (process limit, not print). Plate top stays at
+// PRINT_TOP_OFFSET_CM below the cloth top; the height shrinks downward.
 export const PRINT_W_CM = 40.64;
-export const PRINT_H_CM = 45.72;
+export const PRINT_H_CM = 45.72 - 5;
 export const PRINT_ASPECT = PRINT_W_CM / PRINT_H_CM;
 // Print area in normalized UV — sized so cloth result is exactly PRINT_W_CM × PRINT_H_CM
 export const PRINT_W_UV = PRINT_W_CM / CLOTH_W_CM;
@@ -73,3 +77,29 @@ export const FOCUS_BOUNDS = {
 // (so `ClothPiece_Fabric_0_ClothPiece_3`, without the `_1` primitive suffix
 // that appears in the JSON's `meshes[].name`).
 export const FRONT_CLOTH_MESH = 'ClothPiece_Fabric_0_ClothPiece_3';
+
+// GLB UV anisotropy correction (sharedCanvas → 3D viewer only).
+//
+// Measured from the GLB front-cloth mesh (see app/scripts/inspect-front-cloth-uv.mjs):
+//   median 3D-edge length per UV unit:  U: 53.8 mm/UV   V: 35.3 mm/UV
+// vs. the flat-panel assumption (size-M chart):
+//   implied: U: CLOTH_W_CM·10/rangeU ≈ 58.7 mm/UV   V: CLOTH_H_CM·10/rangeV ≈ 32.8 mm/UV
+//
+// Apply these scales on sharedCanvas, anchored at cloth horizontal center
+// (canvas U = TEX_W/2) and cloth top (canvas V = 0).
+//
+// Anisotropy lock ratio U/V = 1.092/0.929 = 1.176. Derived purely from the
+// GLB UV measurements (independent of the print spec). At this ratio a square
+// drawn on sharedCanvas comes out square on the GLB cloth surface; otherwise
+// pattern + plate render vertically stretched.
+const GLB_LOCK_RATIO = 1.092 / 0.929;
+
+// U scale picks the *visual* size of the print on this GLB. 1.092 = strict
+// physical 40.64 cm but pushes the plate to ~78.7% of projected cloth width
+// and kisses the sleeve seam in a frontal view. 0.92 backs off to ~73.6%
+// projected (a comfortable >5 cm margin per side) at the cost of the plate
+// rendering ~37 cm physical on the cloth instead of 40.64.
+export const GLB_TEX_SCALE_U = 0.92;
+// V always derived from U via the anisotropy lock so changing U preserves
+// the print's spec aspect (40.64 × PRINT_H_CM).
+export const GLB_TEX_SCALE_V = GLB_TEX_SCALE_U / GLB_LOCK_RATIO;
