@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { detectPoseCached, POSE_INDEX, type PoseLandmark } from './poseDetector';
 import { photoPatternCanvas, subscribePattern, getPatternRelBox } from './textureStore';
-import { PRINT_H_UV, PRINT_V, PRINT_W_UV } from './modelAssets';
+import { PRINT_ASPECT, PRINT_V, PRINT_W_UV } from './modelAssets';
 
 const HIGHPASS_CACHE_PREFIX = 'hp-cache:v1:';
 
@@ -45,21 +45,13 @@ function lerpPt(a: Pt, b: Pt, t: number): Pt {
 //   typical t-shirt → hip-joint at V ≈ 0.90.
 // SHOULDER_SPAN_OF_CLOTH_W: the cloth extends past the shoulder joints out
 //   to the sleeve attachment, so detected shoulder span is ~0.85× cloth W.
-//
-// To convert a cloth-V into the photo's shoulder→hip parametric t:
-//     t = (V - MIDSHOULDER_CLOTH_V) / (MIDHIP_CLOTH_V - MIDSHOULDER_CLOTH_V)
-//
-// The quad is a parallelogram (single width vector) so the pattern slides
-// cleanly with the body axis without weird perspective distortion on
-// slightly-turned subjects.
 const MIDSHOULDER_CLOTH_V = 0.10;
 const MIDHIP_CLOTH_V = 0.90;
 const SHOULDER_SPAN_OF_CLOTH_W = 0.85;
 
 const BODY_AXIS_CLOTH_V_RANGE = MIDHIP_CLOTH_V - MIDSHOULDER_CLOTH_V;
+// Top-of-print position along the shoulder→hip axis (parametric t).
 const PRINT_TOP_T = (PRINT_V - MIDSHOULDER_CLOTH_V) / BODY_AXIS_CLOTH_V_RANGE;
-const PRINT_BOT_T =
-  (PRINT_V + PRINT_H_UV - MIDSHOULDER_CLOTH_V) / BODY_AXIS_CLOTH_V_RANGE;
 // Print width (cloth fraction) → fraction of shoulder span via calibration.
 // Drives off PRINT_W_UV so 3D / UV editor / photos all stay in sync.
 const PRINT_W_FRAC = PRINT_W_UV / SHOULDER_SPAN_OF_CLOTH_W;
@@ -84,15 +76,13 @@ function quadFromLandmarks(lm: PoseLandmark[], w: number, h: number): Quad {
     y: (leftHip.y + rightHip.y) / 2,
   };
 
+  // Vertical anchor: where the top edge of the print plate sits along the
+  // shoulder→hip axis. Position only — does NOT control height.
   const printTop = lerpPt(topMid, botMid, PRINT_TOP_T);
-  const printBot = lerpPt(topMid, botMid, PRINT_BOT_T);
 
-  // Width-direction angle = average of shoulder-line and hip-line angles
-  // (subject's-right → subject's-left). When both agree (real torso lean),
-  // the pattern follows the body. When they disagree (e.g., a raised arm
-  // tilts the shoulder line but not the hip line), averaging halves the
-  // spurious shoulder tilt instead of letting it run away. With both arms
-  // hanging naturally the two angles are ~0 and the pattern is upright.
+  // Width-direction angle = average of shoulder-line and hip-line angles.
+  // Averaging halves a spurious shoulder tilt (e.g. raised arm) instead of
+  // letting it run away.
   const shoulderAngle = Math.atan2(
     leftShoulder.y - rightShoulder.y,
     leftShoulder.x - rightShoulder.x
@@ -102,22 +92,33 @@ function quadFromLandmarks(lm: PoseLandmark[], w: number, h: number): Quad {
     leftHip.x - rightHip.x
   );
   const tiltAngle = (shoulderAngle + hipAngle) / 2;
-  // Magnitude from full Euclidean shoulder span (perspective-foreshortens
-  // correctly when the subject turns).
+
+  // Width: from shoulder span (most stable cm reference on a clothed photo).
+  // Height: locked to the print plate's physical aspect — never derived from
+  // shoulder→hip distance, otherwise body-proportion / perspective variations
+  // would stretch the pattern differently on every model.
   const shoulderLen = Math.hypot(
     leftShoulder.x - rightShoulder.x,
     leftShoulder.y - rightShoulder.y
   );
-  const halfMag = shoulderLen * 0.5 * PRINT_W_FRAC;
-  const halfX = Math.cos(tiltAngle) * halfMag;
-  const halfY = Math.sin(tiltAngle) * halfMag;
+  const halfW = shoulderLen * 0.5 * PRINT_W_FRAC;
+  const halfX = Math.cos(tiltAngle) * halfW;
+  const halfY = Math.sin(tiltAngle) * halfW;
+
+  // Down vector = perpendicular to width axis (rotate width 90° CW in
+  // image-space, so it points toward the hip), magnitude = printedWidth /
+  // PRINT_ASPECT. This guarantees printedHeight / printedWidth ≡ PRINT_ASPECT.
+  const printedW = halfW * 2;
+  const printedH = printedW / PRINT_ASPECT;
+  const downX = -Math.sin(tiltAngle) * printedH;
+  const downY = Math.cos(tiltAngle) * printedH;
 
   // tl/bl on subject's-right side (viewer's image-left for front-facing).
   return {
     tl: { x: printTop.x - halfX, y: printTop.y - halfY },
     tr: { x: printTop.x + halfX, y: printTop.y + halfY },
-    bl: { x: printBot.x - halfX, y: printBot.y - halfY },
-    br: { x: printBot.x + halfX, y: printBot.y + halfY },
+    bl: { x: printTop.x - halfX + downX, y: printTop.y - halfY + downY },
+    br: { x: printTop.x + halfX + downX, y: printTop.y + halfY + downY },
   };
 }
 
