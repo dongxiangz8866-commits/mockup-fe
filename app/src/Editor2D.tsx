@@ -3,10 +3,8 @@ import {
   TEX_H,
   TEX_W,
   markTextureDirty,
+  setPattern,
   sharedCtx,
-  photoPatternCtx,
-  PHOTO_PATTERN_W,
-  PHOTO_PATTERN_H,
 } from './textureStore';
 import {
   EDITOR_V_FACTOR,
@@ -142,11 +140,8 @@ function snapToCenter(b: Box): { box: Box; snap: SnapState } {
 function paintTexture(img: HTMLImageElement | null, box: Box | null) {
   sharedCtx.fillStyle = '#ffffff';
   sharedCtx.fillRect(0, 0, TEX_W, TEX_H);
-  // Photo-pattern canvas keeps PNG alpha so the real-model composite can
-  // mask the high-pass fold overlay to the pattern's actual shape; otherwise
-  // transparent PNG pixels double-up the cloth weave into a visible grid.
-  photoPatternCtx.clearRect(0, 0, PHOTO_PATTERN_W, PHOTO_PATTERN_H);
   if (!img || !box || !img.complete || img.naturalWidth === 0) {
+    setPattern(null);
     markTextureDirty();
     return;
   }
@@ -200,25 +195,10 @@ function paintTexture(img: HTMLImageElement | null, box: Box | null) {
   drawSharedTexture(sharedCtx, tx, ty, tw, th);
   sharedCtx.restore();
 
-  const relU = (box.u - PRINT_U) / PRINT_W_UV;
-  const relV = (box.v - PRINT_V) / PRINT_H_UV;
-  const relW = box.w / PRINT_W_UV;
-  const relH = box.h / PRINT_H_UV;
-  photoPatternCtx.save();
-  photoPatternCtx.beginPath();
-  photoPatternCtx.rect(0, 0, PHOTO_PATTERN_W, PHOTO_PATTERN_H);
-  photoPatternCtx.clip();
-  photoPatternCtx.imageSmoothingEnabled = true;
-  photoPatternCtx.imageSmoothingQuality = 'high';
-  photoPatternCtx.drawImage(
-    img,
-    relU * PHOTO_PATTERN_W,
-    relV * PHOTO_PATTERN_H,
-    relW * PHOTO_PATTERN_W,
-    relH * PHOTO_PATTERN_H
-  );
-  photoPatternCtx.restore();
-
+  // Real-model path consumes the source image directly via getPattern() —
+  // no intermediate canvas downsample. ModelGrid does a single affine warp
+  // from the source image onto the photo's plate quad.
+  setPattern({ img, box });
   markTextureDirty();
 }
 

@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { detectPoseCached, POSE_INDEX, type PoseLandmark } from './poseDetector';
-import { photoPatternCanvas, subscribePattern } from './textureStore';
-import { PRINT_ASPECT, PRINT_V, PRINT_W_UV } from './modelAssets';
+import { detectPoseCached, POSE_INDEX, readCachedPose, type PoseLandmark } from './poseDetector';
+import { getPattern, subscribePattern } from './textureStore';
+import { PRINT_ASPECT, PRINT_H_UV, PRINT_U, PRINT_V, PRINT_W_UV } from './modelAssets';
+
+// Module-level in-memory caches keyed by src URL. localStorage already caches
+// pose + high-pass, but each lookup re-decodes a data URL into an Image —
+// adding a frame of "加载中" UI on every mount. The mem caches keep the live
+// HTMLImageElement / HTMLCanvasElement so the modal's second mount renders
+// instantly without ever showing a loading badge.
+const photoMemCache = new Map<string, HTMLImageElement>();
+const highPassMemCache = new Map<string, HTMLCanvasElement>();
+const memHpKey = (src: string, s: number) => `${src}|s=${s}`;
 
 const HIGHPASS_CACHE_PREFIX = 'hp-cache:v1:';
 
@@ -207,56 +216,102 @@ function ModelComposite({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const photoRef = useRef<HTMLImageElement | null>(null);
   const highPassRef = useRef<HTMLCanvasElement | null>(null);
-  const [quad, setQuad] = useState<Quad | null>(null);
-  const [photoSize, setPhotoSize] = useState<{ w: number; h: number } | null>(null);
-  const [status, setStatus] = useState<'loading' | 'pose' | 'ready' | 'fail'>('loading');
+
+  // Hydrate from in-memory caches synchronously so a re-mount (e.g. modal)
+  // for a previously-rendered src boots straight to 'ready' — no loading UI.
+  const initPhoto = photoMemCache.get(src) ?? null;
+  const initHp = highPassMemCache.get(memHpKey(src, foldStrength)) ?? null;
+  const initPose = initPhoto ? readCachedPose(src) : null;
+  if (initPhoto && photoRef.current !== initPhoto) photoRef.current = initPhoto;
+  if (initHp && highPassRef.current !== initHp) highPassRef.current = initHp;
+
+  const [photoSize, setPhotoSize] = useState<{ w: number; h: number } | null>(() =>
+    initPhoto ? { w: initPhoto.naturalWidth, h: initPhoto.naturalHeight } : null
+  );
+  const [quad, setQuad] = useState<Quad | null>(() =>
+    initPhoto && initPose
+      ? quadFromLandmarks(initPose, initPhoto.naturalWidth, initPhoto.naturalHeight)
+      : null
+  );
+  const [status, setStatus] = useState<'loading' | 'pose' | 'ready' | 'fail'>(() =>
+    initPhoto && initHp && initPose ? 'ready' : 'loading'
+  );
 
   useEffect(() => {
-    setStatus('loading');
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = async () => {
-      photoRef.current = img;
-      setPhotoSize({ w: img.naturalWidth, h: img.naturalHeight });
+    let cancelled = false;
+    // Fast path: everything already hydrated from mem caches.
+    if (photoRef.current && highPassRef.current && quad) return;
 
-      const hpKey = `${src}|s=${foldStrength}`;
-      const cachedHp = loadCachedHighPass(hpKey);
-      if (cachedHp) {
-        await new Promise<void>((res) => {
-          if (cachedHp.complete) res();
-          else cachedHp.onload = () => res();
-        });
-        const c = document.createElement('canvas');
-        c.width = img.naturalWidth;
-        c.height = img.naturalHeight;
-        c.getContext('2d')!.drawImage(cachedHp, 0, 0, c.width, c.height);
-        highPassRef.current = c;
-      } else {
-        const built = buildHighPass(img, foldStrength);
-        highPassRef.current = built;
-        saveCachedHighPass(hpKey, built);
+    setStatus('loading');
+    const img = photoRef.current ?? new Image();
+    if (!photoRef.current) img.crossOrigin = 'anonymous';
+
+    const onReady = async (image: HTMLImageElement) => {
+      if (cancelled) return;
+      photoRef.current = image;
+      photoMemCache.set(src, image);
+      setPhotoSize({ w: image.naturalWidth, h: image.naturalHeight });
+
+      let hp = highPassMemCache.get(memHpKey(src, foldStrength)) ?? null;
+      if (!hp) {
+        const hpKey = `${src}|s=${foldStrength}`;
+        const cachedHp = loadCachedHighPass(hpKey);
+        if (cachedHp) {
+          await new Promise<void>((res) => {
+            if (cachedHp.complete) res();
+            else cachedHp.onload = () => res();
+          });
+          if (cancelled) return;
+          const c = document.createElement('canvas');
+          c.width = image.naturalWidth;
+          c.height = image.naturalHeight;
+          c.getContext('2d')!.drawImage(cachedHp, 0, 0, c.width, c.height);
+          hp = c;
+        } else {
+          hp = buildHighPass(image, foldStrength);
+          saveCachedHighPass(hpKey, hp);
+        }
+        highPassMemCache.set(memHpKey(src, foldStrength), hp);
       }
+      if (cancelled) return;
+      highPassRef.current = hp;
 
       setStatus('pose');
       try {
-        const lm = await detectPoseCached(img, src);
+        const lm = await detectPoseCached(image, src);
+        if (cancelled) return;
         if (lm) {
-          setQuad(quadFromLandmarks(lm, img.naturalWidth, img.naturalHeight));
+          setQuad(quadFromLandmarks(lm, image.naturalWidth, image.naturalHeight));
           setStatus('ready');
         } else {
           setStatus('fail');
         }
       } catch (e) {
+        if (cancelled) return;
         console.warn('pose fail', e);
         setStatus('fail');
       }
     };
-    img.src = src;
+
+    if (photoRef.current) {
+      onReady(photoRef.current);
+    } else {
+      img.onload = () => onReady(img);
+      img.src = src;
+    }
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src]);
 
   useEffect(() => {
     if (!photoRef.current) return;
+    const memHp = highPassMemCache.get(memHpKey(src, foldStrength));
+    if (memHp) {
+      highPassRef.current = memHp;
+      return;
+    }
     const hpKey = `${src}|s=${foldStrength}`;
     const cached = loadCachedHighPass(hpKey);
     if (cached) {
@@ -266,12 +321,14 @@ function ModelComposite({
         c.height = photoRef.current!.naturalHeight;
         c.getContext('2d')!.drawImage(cached, 0, 0, c.width, c.height);
         highPassRef.current = c;
+        highPassMemCache.set(memHpKey(src, foldStrength), c);
       };
       if (cached.complete) finish();
       else cached.onload = finish;
     } else {
       const built = buildHighPass(photoRef.current, foldStrength);
       highPassRef.current = built;
+      highPassMemCache.set(memHpKey(src, foldStrength), built);
       saveCachedHighPass(hpKey, built);
     }
   }, [foldStrength, src]);
@@ -281,33 +338,57 @@ function ModelComposite({
     return () => {
       const photo = photoRef.current;
       const cv = canvasRef.current;
+      const pat = getPattern();
       if (!photo || !cv || !photoSize) return;
       cv.width = photoSize.w;
       cv.height = photoSize.h;
       const ctx = cv.getContext('2d')!;
       ctx.drawImage(photo, 0, 0);
-      if (!quad) return;
+      if (!quad || !pat) return;
 
-      // Step 1: warp pattern into an off-screen canvas with a SINGLE affine
-      // transform. The quad is a true parallelogram (tr-tl = br-bl), so the
-      // mapping rectangle→parallelogram is exactly an affine — no triangle
-      // subdivision, no seams.
-      //   matrix maps (0,0)→tl, (pw,0)→tr, (0,ph)→bl  ⇒  br falls into place
+      // Step 1: warp the SOURCE pattern image directly onto the plate quad
+      // via a single affine — skipping the photoPatternCanvas intermediate
+      // that previously double-resampled (source → 2K canvas → quad). Single
+      // pass preserves source detail, especially for low-res uploads where
+      // the old chain compounded bilinear blur.
+      //   - clip tmp to the plate quad so any pattern overhang is cut off.
+      //   - affine maps source-pixel (sx, sy) into the box's image-space
+      //     position inside the plate parallelogram (relU/V/W/H = where the
+      //     pattern box sits in plate-fraction coords).
       const tmp = document.createElement('canvas');
       tmp.width = cv.width;
       tmp.height = cv.height;
       const tctx = tmp.getContext('2d')!;
       tctx.imageSmoothingEnabled = true;
       tctx.imageSmoothingQuality = 'high';
-      const pw = photoPatternCanvas.width;
-      const ph = photoPatternCanvas.height;
-      const ax = (quad.tr.x - quad.tl.x) / pw;
-      const ay = (quad.tr.y - quad.tl.y) / pw;
-      const bx = (quad.bl.x - quad.tl.x) / ph;
-      const by = (quad.bl.y - quad.tl.y) / ph;
-      tctx.setTransform(ax, ay, bx, by, quad.tl.x, quad.tl.y);
-      tctx.drawImage(photoPatternCanvas, 0, 0);
+      tctx.save();
+      tctx.beginPath();
+      tctx.moveTo(quad.tl.x, quad.tl.y);
+      tctx.lineTo(quad.tr.x, quad.tr.y);
+      tctx.lineTo(quad.br.x, quad.br.y);
+      tctx.lineTo(quad.bl.x, quad.bl.y);
+      tctx.closePath();
+      tctx.clip();
+      const W = pat.img.naturalWidth;
+      const H = pat.img.naturalHeight;
+      const relU = (pat.box.u - PRINT_U) / PRINT_W_UV;
+      const relV = (pat.box.v - PRINT_V) / PRINT_H_UV;
+      const relW = pat.box.w / PRINT_W_UV;
+      const relH = pat.box.h / PRINT_H_UV;
+      const ux = quad.tr.x - quad.tl.x;
+      const uy = quad.tr.y - quad.tl.y;
+      const vx = quad.bl.x - quad.tl.x;
+      const vy = quad.bl.y - quad.tl.y;
+      const ex = quad.tl.x + relU * ux + relV * vx;
+      const ey = quad.tl.y + relU * uy + relV * vy;
+      const ax = (relW / W) * ux;
+      const ay = (relW / W) * uy;
+      const bx = (relH / H) * vx;
+      const by = (relH / H) * vy;
+      tctx.setTransform(ax, ay, bx, by, ex, ey);
+      tctx.drawImage(pat.img, 0, 0);
       tctx.setTransform(1, 0, 0, 1, 0, 0);
+      tctx.restore();
 
       // Step 2: composite onto the photo via createPattern + fill — fill
       // uses anti-aliased path rasterization, so the quad boundary is smooth.

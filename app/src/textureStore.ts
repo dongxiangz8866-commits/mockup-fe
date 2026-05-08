@@ -21,17 +21,16 @@ sharedTexture.minFilter = THREE.LinearMipmapLinearFilter;
 sharedTexture.magFilter = THREE.LinearFilter;
 sharedTexture.generateMipmaps = true;
 
-// 2048-wide so the pattern stays sharp when warped onto large (4-5K) photos —
-// at 1024 the pattern was upsampled which softened the edges.
-// Aspect matches the print plate (16in × 18in = 40.64 × 45.72 cm).
-export const PHOTO_PATTERN_W = 2048;
-export const PHOTO_PATTERN_H = Math.round((2048 * 45.72) / 40.64);
-
-const photoCanvas = document.createElement('canvas');
-photoCanvas.width = PHOTO_PATTERN_W;
-photoCanvas.height = PHOTO_PATTERN_H;
-export const photoPatternCanvas = photoCanvas;
-export const photoPatternCtx = photoCanvas.getContext('2d')!;
+// Source pattern image + its UV box. Real-model composite warps this image
+// directly onto the photo via a single affine — no intermediate downsampled
+// canvas — so source resolution survives all the way to the quad rasterization.
+export type PatternBox = { u: number; v: number; w: number; h: number };
+export type PatternState = { img: HTMLImageElement; box: PatternBox } | null;
+let pattern: PatternState = null;
+export const getPattern = (): PatternState => pattern;
+export const setPattern = (p: PatternState): void => {
+  pattern = p;
+};
 
 let listeners: Array<() => void> = [];
 export function subscribePattern(cb: () => void): () => void {
