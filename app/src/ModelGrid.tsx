@@ -9,16 +9,68 @@ import { PRINT_ASPECT, PRINT_H_UV, PRINT_U, PRINT_V, PRINT_W_UV } from './modelA
 // HTMLImageElement / HTMLCanvasElement so the modal's second mount renders
 // instantly without ever showing a loading badge.
 const photoMemCache = new Map<string, HTMLImageElement>();
-const highPassMemCache = new Map<string, HTMLCanvasElement>();
 const shadingMemCache = new Map<string, HTMLCanvasElement>();
 const highlightMemCache = new Map<string, HTMLCanvasElement>();
-const memHpKey = (src: string, s: number) => `${src}|s=${s}`;
 
-const HIGHPASS_CACHE_PREFIX = 'hp-cache:v1:';
+// Aggregate shirt-fabric color stats sampled from a pattern-free band of the
+// print quad. Drives the print-on-cloth blend: chromatic adaptation, black
+// level lift, sharpness — all of which kill the "sticker" feel where a pure
+// pattern is drawn over the photo with no awareness of the shirt's color
+// cast or shadow level.
+type GarmentSample = {
+  rgb: [number, number, number];
+  lumP5: number;
+  lumP95: number;
+};
+const garmentMemCache = new Map<string, GarmentSample>();
+const fabricMemCache = new Map<string, HTMLCanvasElement>();
 
-function loadCachedHighPass(key: string): HTMLImageElement | null {
+// Per-shirt-type tunable preset. Decided once per photo from the GarmentSample;
+// keeps the render pipeline branchless. Captures the asymmetry between shirts:
+//   • white tees need pattern blacks lifted so they don't read as ink-on-paper,
+//     and folds/highlights softer because shirt itself is bright (extra contrast
+//     fights with the natural shirt look)
+//   • black tees the opposite — no lift (would gray-wash pattern), STRONGER folds
+//     because the black shirt's fold contrast is naturally subtle
+//   • colored tees in between, with stronger chromatic adaptation since the
+//     shirt's hue dominates the perceived integration
+type PresetKey = 'white' | 'black' | 'color';
+type PresetCfg = {
+  tint: number;       // chromatic adaptation mix
+  liftFrac: number;   // fraction of garment.lumP5 to use as black-level floor
+  foldMul: number;    // step 2.5 fitAlpha multiplier
+  hlMul: number;      // step 2.6 hlAlpha multiplier
+  fabricMul: number;  // step 2.7 fabric texture overlay alpha
+  bendExp: number;    // cylinder bend exponent (1.0 = no bend; >1 compresses edges)
+};
+const PRESETS: Record<PresetKey, PresetCfg> = {
+  white: { tint: 0.20, liftFrac: 0.40, foldMul: 0.85, hlMul: 0.85, fabricMul: 0.20, bendExp: 1.10 },
+  black: { tint: 0.30, liftFrac: 0.0,  foldMul: 1.10, hlMul: 1.00, fabricMul: 0.30, bendExp: 1.15 },
+  color: { tint: 0.40, liftFrac: 0.30, foldMul: 0.95, hlMul: 0.90, fabricMul: 0.25, bendExp: 1.12 },
+};
+
+function classifyShirt(g: GarmentSample): PresetKey {
+  const [r, gr, b] = g.rgb;
+  const max = Math.max(r, gr, b);
+  const min = Math.min(r, gr, b);
+  const sat = max > 0 ? (max - min) / max : 0;
+  if (g.lumP95 > 200 && sat < 0.10) return 'white';
+  if (g.lumP95 < 70 && sat < 0.25) return 'black';
+  return 'color';
+}
+
+const SHADING_CACHE_PREFIX = 'sh-cache:v5:';
+const HIGHLIGHT_CACHE_PREFIX = 'hl-cache:v4:';
+const FABRIC_CACHE_PREFIX = 'fb-cache:v1:';
+
+// Persist shading + highlight maps so a page reload doesn't pay the per-pixel
+// ImageData cost again (~100-200 ms × 2 maps × N photos). Both maps are
+// already heavy-blurred (5% radius + post-blur), so saving at HALF resolution
+// loses no useful detail and quarters the localStorage bytes. Quality 0.6
+// JPEG of half-res grayscale is typically 30-80 KB per map.
+function loadCachedMap(prefix: string, key: string): HTMLImageElement | null {
   try {
-    const data = localStorage.getItem(HIGHPASS_CACHE_PREFIX + key);
+    const data = localStorage.getItem(prefix + key);
     if (!data) return null;
     const img = new Image();
     img.src = data;
@@ -28,13 +80,41 @@ function loadCachedHighPass(key: string): HTMLImageElement | null {
   }
 }
 
-function saveCachedHighPass(key: string, canvas: HTMLCanvasElement): void {
+function saveCachedMap(prefix: string, key: string, canvas: HTMLCanvasElement): void {
   try {
-    const data = canvas.toDataURL('image/jpeg', 0.6);
-    localStorage.setItem(HIGHPASS_CACHE_PREFIX + key, data);
+    const halfW = Math.max(1, Math.round(canvas.width / 2));
+    const halfH = Math.max(1, Math.round(canvas.height / 2));
+    const tmp = document.createElement('canvas');
+    tmp.width = halfW;
+    tmp.height = halfH;
+    const tctx = tmp.getContext('2d')!;
+    tctx.imageSmoothingEnabled = true;
+    tctx.imageSmoothingQuality = 'high';
+    tctx.drawImage(canvas, 0, 0, halfW, halfH);
+    const data = tmp.toDataURL('image/jpeg', 0.6);
+    localStorage.setItem(prefix + key, data);
   } catch {
-    // quota — ignore
+    // quota — ignore (next reload will rebuild)
   }
+}
+
+// Decode a localStorage map image (saved at half-res) onto a fresh canvas at
+// full photo resolution. drawImage's bilinear upscale is fine — the maps are
+// already smooth so no detail to lose.
+async function decodeCachedMap(
+  cached: HTMLImageElement,
+  w: number,
+  h: number
+): Promise<HTMLCanvasElement> {
+  await new Promise<void>((res) => {
+    if (cached.complete) res();
+    else cached.onload = () => res();
+  });
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  c.getContext('2d')!.drawImage(cached, 0, 0, w, h);
+  return c;
 }
 
 type ModelEntry = { url: string; mtime: number };
@@ -167,60 +247,38 @@ function quadFromLandmarks(lm: PoseLandmark[], w: number, h: number): Quad {
   };
 }
 
-function buildHighPass(photo: HTMLImageElement, strength: number): HTMLCanvasElement {
-  const w = photo.naturalWidth;
-  const h = photo.naturalHeight;
-  const blurRadius = Math.max(8, Math.round(Math.min(w, h) * 0.012));
-  const blurC = document.createElement('canvas');
-  blurC.width = w;
-  blurC.height = h;
-  const blurCtx = blurC.getContext('2d')!;
-  blurCtx.filter = `blur(${blurRadius}px)`;
-  blurCtx.drawImage(photo, 0, 0);
-  const origC = document.createElement('canvas');
-  origC.width = w;
-  origC.height = h;
-  const origCtx = origC.getContext('2d')!;
-  origCtx.drawImage(photo, 0, 0);
-  const O = origCtx.getImageData(0, 0, w, h);
-  const B = blurCtx.getImageData(0, 0, w, h);
-  const out = origCtx.createImageData(w, h);
-  const Od = O.data;
-  const Bd = B.data;
-  const Dd = out.data;
-  for (let i = 0; i < Od.length; i += 4) {
-    const lO = Od[i] * 0.299 + Od[i + 1] * 0.587 + Od[i + 2] * 0.114;
-    const lB = Bd[i] * 0.299 + Bd[i + 1] * 0.587 + Bd[i + 2] * 0.114;
-    const v = (lO - lB) * strength + 128;
-    const c = v < 0 ? 0 : v > 255 ? 255 : v;
-    Dd[i] = c;
-    Dd[i + 1] = c;
-    Dd[i + 2] = c;
-    Dd[i + 3] = 255;
-  }
-  origCtx.putImageData(out, 0, 0);
-  return origC;
-}
-
-// Per-pixel relative shading map: photo / blur(photo, MEDIUM), encoded for
-// HARD-LIGHT (mid-gray 128 ≡ ratio 1.0 ≡ mathematical identity). Folds map
-// to bytes < 128 → hard-light darkens pattern. Bumps / highlights map to
-// > 128 → hard-light lightens pattern (capped per-channel for already-bright
-// patterns). Result: bidirectional "vacuum-fit" — printed-on look with both
-// the dark fold lines AND subtle bumps showing through the pattern.
+// Per-pixel PERCEPTUAL-RATIO shading map: encodes the relative luminance
+// change `(photo − blur) / max(blur, FLOOR)` around byte 128 (hard-light
+// identity). Folds → byte < 128 → hard-light darkens pattern.
 //
-// Why mid-gray identity matters: the pattern's nominal color in flat shirt
-// areas (where ratio ≈ 1, byte ≈ 128) is preserved exactly under hard-light,
-// regardless of the shirt photo's absolute brightness or globalAlpha. This
-// is the property that makes the foldStrength slider safe — it only changes
-// fold/highlight pixels, never flat-area pixels.
+// Why ratio with a floor (vs pure additive or pure ratio):
+//   • Pure additive `(photo − blur) + 128` was robust on white shirts but
+//     went silent on black: an absolute 5-byte fold drop on a near-black
+//     fabric only nudged byte to 123 — visually identity, no folds at all.
+//     Human eyes see fold contrast as RELATIVE to base brightness, so
+//     additive under-represents folds on dark fabrics.
+//   • Pure ratio `photo / blur` was the opposite failure mode: on a black
+//     shirt 5/10 = 0.5 collapses to byte 0 and hard-light slams the pattern
+//     to black for what's only a 2% absolute darkening.
+//   • Ratio-with-floor `(photo − blur) / max(blur, 30)` captures perceptual
+//     contrast on real-fabric ranges but caps the divisor at FLOOR=30 so
+//     near-black pixels can't blow up. White shirt (lB≈230, diff=−30):
+//     ratio ≈ −0.13 → byte 102 (moderate darken). Black shirt (lB≈10,
+//     diff=−5): floor kicks in (max(10,30)=30), ratio ≈ −0.17 → byte 95
+//     (visible darken). Pure-black noise (lB≈2, diff=−1): floor=30, ratio
+//     ≈ −0.03 → byte 121 (subtle, doesn't slam).
 //
-// Two blurs: the LARGE one (5% of min dim) is the local-mean estimator for
-// the ratio; the SMALL post-blur (0.3% of min dim, ~4-6 px) denoises the
-// per-pixel ratio jitter. Without the post-blur, photo sensor noise + JPEG
-// blocking artifacts read straight into the pattern as "rotten" texture.
-// 4-6 px is far below the typical fold width (10-30 px) so fold detail
-// survives.
+// Cap at byte 128 (no values above): hard-light's lightening branch
+// (`1 - 2·(1-bg)·(1-src)`) lifts dim color channels of saturated patterns
+// (yellow blue → pale yellow blue) wherever the shirt has a bump. Capping
+// throws away the bump-pop cue but keeps pattern saturation intact. The
+// dominant 3D cue is the dark fold line anyway; the screen-blend Step 2.6
+// adds back a tiny saturation-safe lift at strong bumps only.
+//
+// Two blurs: the LARGE one (5% of min dim) is the local-mean estimator;
+// the SMALL post-blur (0.3% ≈ 4-6 px) denoises the per-pixel jitter. The
+// medium blur radius is wide enough that sensor noise / JPEG blocking
+// barely affects the local mean, so post-blur is light here.
 function buildShadingMap(photo: HTMLImageElement): HTMLCanvasElement {
   const w = photo.naturalWidth;
   const h = photo.naturalHeight;
@@ -244,48 +302,53 @@ function buildShadingMap(photo: HTMLImageElement): HTMLCanvasElement {
   const Dd = out.data;
   for (let i = 0; i < Od.length; i += 4) {
     const lO = Od[i] * 0.299 + Od[i + 1] * 0.587 + Od[i + 2] * 0.114;
-    const lB = Math.max(1, Bd[i] * 0.299 + Bd[i + 1] * 0.587 + Bd[i + 2] * 0.114);
-    const ratio = lO / lB;
-    // Encode FOLDS ONLY: ratio < 1 → byte < 128 (hard-light darkens),
-    // ratio ≥ 1 → byte 128 (hard-light identity, no change). The highlight
-    // branch of hard-light (`1 - 2·(1-bg)·(1-src)`) lifts every dim color
-    // channel toward 1, which desaturates any non-grayscale pattern color
-    // (yellow → pale yellow, blue → pale blue) the moment a shirt-bump
-    // pixel goes above the local mean. Capping at 128 throws away the
-    // "bump pops out" cue but keeps pattern saturation intact — the
-    // dominant 3D cue is the dark fold line anyway.
-    const v = Math.max(0, Math.min(128, 128 + (ratio - 1) * 256));
+    const lB = Bd[i] * 0.299 + Bd[i + 1] * 0.587 + Bd[i + 2] * 0.114;
+    // Perceptual ratio with floor: byte = 128 + (photo - blur) / max(blur, 30) * 160.
+    // Floor=30 stops dark-shirt division explosion (a 5-byte fold drop on
+    // L=10 fabric would otherwise read as 50% darker and slam pattern to
+    // black). Scale 160 fits realistic ratios (≈ ±0.15) into the 0-128
+    // half of the hard-light input range without the previous 200's "hard
+    // edge" feel on dark fabric.
+    const FLOOR = 30;
+    const r = (lO - lB) / Math.max(lB, FLOOR);
+    const v = Math.max(0, Math.min(128, Math.round(128 + r * 160)));
     Dd[i] = v;
     Dd[i + 1] = v;
     Dd[i + 2] = v;
     Dd[i + 3] = 255;
   }
   origCtx.putImageData(out, 0, 0);
-  // Post-blur denoise: removes per-pixel ratio noise without affecting
-  // medium-frequency fold structure.
+  // Post-blur denoise (~0.8% of min dim): wider than the prior 0.3% to
+  // soften fold-edge transitions on dark fabrics, where ratio amplifies
+  // pixel noise into visibly "hard" stripes. The medium-frequency fold
+  // structure (10s of pixels wide) survives this radius unchanged.
   const denoised = document.createElement('canvas');
   denoised.width = w;
   denoised.height = h;
   const dctx = denoised.getContext('2d')!;
-  dctx.filter = `blur(${Math.max(3, Math.round(Math.min(w, h) * 0.003))}px)`;
+  dctx.filter = `blur(${Math.max(6, Math.round(Math.min(w, h) * 0.008))}px)`;
   dctx.drawImage(origC, 0, 0);
   return denoised;
 }
 
-// Highlight map for the SCREEN pass: encodes only strong bright bumps
-// (ratio > 1.05). Sub-threshold variations stay at byte 0 — screen identity —
-// so the pass doesn't desaturate flat or mildly-varying pattern regions.
+// Highlight map for the SCREEN pass: encodes only strong bright bumps via
+// the same ratio-with-floor as the shading map, with a small relative
+// threshold so faint local brightenings don't trigger. Sub-threshold
+// variations stay at byte 0 (screen identity) so the pass doesn't
+// desaturate flat / mildly-varying pattern regions.
 //
-// Why a separate canvas instead of expanding the shading map: hard-light's
-// highlight branch lifts every dim color channel toward 1, which washes
-// saturation on bright shirts (Image #6 etc). Screen, in contrast, preserves
-// the *ratio* of channels and only adds light proportional to (1 - bg), so
-// already-bright pattern pixels barely change while dark pattern pixels can
-// pick up some lift. Result: pattern "follows the light" of the shirt in
-// real bumps without recoloring flat areas.
+// Mirrors the shading-map encoding: ratio captures the perceptual
+// brightness change (a 5-byte bump on near-black fabric is a real
+// fold-edge cue; the floor stops near-black noise from registering as a
+// "huge" relative bump).
 //
-// Scale 128 keeps even strong bumps (ratio 1.5) at byte ≈ 58, so combined
-// with a low globalAlpha the lift stays subtle.
+// Why screen blend (not hard-light): screen's `bg + (1-bg)·src` preserves
+// already-bright channels — yellow's R/G stay at 1, only B (dim) lifts a
+// little. Hard-light would wash saturation by lifting all channels toward 1.
+//
+// Threshold ratio 0.04, scale 600: only relative bumps above ~4% contribute;
+// a 15% bump (typical strong shirt highlight) produces byte ~66 which
+// combined with low globalAlpha stays subtle.
 function buildHighlightMap(photo: HTMLImageElement): HTMLCanvasElement {
   const w = photo.naturalWidth;
   const h = photo.naturalHeight;
@@ -309,9 +372,10 @@ function buildHighlightMap(photo: HTMLImageElement): HTMLCanvasElement {
   const Dd = out.data;
   for (let i = 0; i < Od.length; i += 4) {
     const lO = Od[i] * 0.299 + Od[i + 1] * 0.587 + Od[i + 2] * 0.114;
-    const lB = Math.max(1, Bd[i] * 0.299 + Bd[i + 1] * 0.587 + Bd[i + 2] * 0.114);
-    const ratio = lO / lB;
-    const v = Math.max(0, Math.min(255, (ratio - 1.05) * 128));
+    const lB = Bd[i] * 0.299 + Bd[i + 1] * 0.587 + Bd[i + 2] * 0.114;
+    const FLOOR = 30;
+    const r = (lO - lB) / Math.max(lB, FLOOR);
+    const v = Math.max(0, Math.min(255, Math.round((r - 0.04) * 600)));
     Dd[i] = v;
     Dd[i + 1] = v;
     Dd[i + 2] = v;
@@ -322,9 +386,219 @@ function buildHighlightMap(photo: HTMLImageElement): HTMLCanvasElement {
   denoised.width = w;
   denoised.height = h;
   const dctx = denoised.getContext('2d')!;
-  dctx.filter = `blur(${Math.max(3, Math.round(Math.min(w, h) * 0.003))}px)`;
+  dctx.filter = `blur(${Math.max(6, Math.round(Math.min(w, h) * 0.008))}px)`;
   dctx.drawImage(origC, 0, 0);
   return denoised;
+}
+
+// Sample shirt fabric color from two narrow strips at the top and bottom of
+// the print quad. Centered prints virtually never reach those V extents, so
+// the strips are reliably "shirt only" without depending on the pattern's
+// runtime alpha. From the sampled pixels we keep:
+//   • mean RGB        — the shirt's color cast (warm/cool/purple)
+//   • lumP5, lumP95   — robust shadow / highlight floor and ceiling
+//
+// Used by applyGarmentBlend below. Returned struct is small (≤4 numbers) and
+// memoized in garmentMemCache per src.
+function sampleGarment(photo: HTMLImageElement, quad: Quad): GarmentSample {
+  const w = photo.naturalWidth;
+  const h = photo.naturalHeight;
+  const off = document.createElement('canvas');
+  off.width = w;
+  off.height = h;
+  off.getContext('2d')!.drawImage(photo, 0, 0);
+  const mask = document.createElement('canvas');
+  mask.width = w;
+  mask.height = h;
+  const mctx = mask.getContext('2d')!;
+  mctx.fillStyle = '#fff';
+  // Top strip (V 0%-12%) and bottom strip (V 88%-100%) of the print quad.
+  for (const [vs, ve] of [
+    [0.0, 0.12],
+    [0.88, 1.0],
+  ]) {
+    const a = lerpPt(quad.tl, quad.bl, vs);
+    const b = lerpPt(quad.tr, quad.br, vs);
+    const c = lerpPt(quad.tr, quad.br, ve);
+    const d = lerpPt(quad.tl, quad.bl, ve);
+    mctx.beginPath();
+    mctx.moveTo(a.x, a.y);
+    mctx.lineTo(b.x, b.y);
+    mctx.lineTo(c.x, c.y);
+    mctx.lineTo(d.x, d.y);
+    mctx.closePath();
+    mctx.fill();
+  }
+  const pData = off.getContext('2d')!.getImageData(0, 0, w, h).data;
+  const mData = mctx.getImageData(0, 0, w, h).data;
+  const lums: number[] = [];
+  let sR = 0;
+  let sG = 0;
+  let sB = 0;
+  let n = 0;
+  for (let i = 0; i < mData.length; i += 4) {
+    if (mData[i + 3] === 0) continue;
+    const r = pData[i];
+    const g = pData[i + 1];
+    const b = pData[i + 2];
+    sR += r;
+    sG += g;
+    sB += b;
+    n++;
+    lums.push(r * 0.299 + g * 0.587 + b * 0.114);
+  }
+  if (n === 0) return { rgb: [200, 200, 200], lumP5: 60, lumP95: 230 };
+  lums.sort((a, b) => a - b);
+  return {
+    rgb: [sR / n, sG / n, sB / n],
+    lumP5: lums[Math.floor(lums.length * 0.05)],
+    lumP95: lums[Math.floor(lums.length * 0.95)],
+  };
+}
+
+// Pre-process the warped pattern (already drawn into `tmp`) so it reads as
+// printed-on-cloth instead of pasted-on-sticker. Three transforms, all
+// per-pixel within pattern alpha (transparent BG untouched):
+//   1. Chromatic adaptation — shift pattern's color cast toward the shirt's
+//      via a per-channel gain `1 - mix·(1 - shirt_norm_channel)`. Preserves
+//      luminance, only adds the shirt's hue. Works correctly for any shirt
+//      color (white tees pick up subtle warm/cool cast; black/colored tees
+//      shift the pattern's whites without dimming them).
+//   2. Black level lift — remap `[0..255]` to `[lift..255]` so pattern blacks
+//      can't go below the shirt's local shadow level. Pure black ink on a
+//      light shirt (where shadow = ~200) was the strongest "vector sticker"
+//      cue; lifting kills it. On dark shirts lift ≈ 4-6 → effectively no-op.
+//   3. (No blur here — applied at composite time via ctx.filter so the alpha
+//      edge softens too, killing the cut-out vector edge.)
+function applyGarmentBlend(
+  tmp: HTMLCanvasElement,
+  garment: GarmentSample,
+  preset: PresetCfg,
+  bbox: { x: number; y: number; w: number; h: number }
+): void {
+  const cw = tmp.width;
+  const ch = tmp.height;
+  const x = Math.max(0, Math.floor(bbox.x));
+  const y = Math.max(0, Math.floor(bbox.y));
+  const w = Math.min(cw - x, Math.ceil(bbox.w + (bbox.x - x)));
+  const h = Math.min(ch - y, Math.ceil(bbox.h + (bbox.y - y)));
+  if (w <= 0 || h <= 0) return;
+  const ctx = tmp.getContext('2d')!;
+  const img = ctx.getImageData(x, y, w, h);
+  const d = img.data;
+  const [gr, gg, gb] = garment.rgb;
+  const gMax = Math.max(gr, gg, gb, 1);
+  const lift = garment.lumP5 * preset.liftFrac;
+  const liftScale = (255 - lift) / 255;
+  const cR = 1 - preset.tint * (1 - gr / gMax);
+  const cG = 1 - preset.tint * (1 - gg / gMax);
+  const cB = 1 - preset.tint * (1 - gb / gMax);
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] === 0) continue;
+    d[i] = lift + d[i] * cR * liftScale;
+    d[i + 1] = lift + d[i + 1] * cG * liftScale;
+    d[i + 2] = lift + d[i + 2] * cB * liftScale;
+  }
+  ctx.putImageData(img, x, y);
+}
+
+// Fabric texture map: high-frequency luminance content of the photo, encoded
+// around byte 128 (overlay/hard-light identity). Built from a small-radius
+// blur (~0.2% of min dim, capturing weave/grain frequencies) so the result
+// is the "shirt's microstructure" — fabric weave, sensor grain, lighting
+// micro-patterns. Applied as an overlay-blend pass within pattern alpha at
+// low alpha (preset.fabricMul × foldStrength), it transfers the shirt's
+// surface character onto the pattern. Without this, the pattern reads as
+// "smooth printed surface" against the shirt's textured surface — a key
+// sticker-cue.
+function buildFabricTexture(photo: HTMLImageElement): HTMLCanvasElement {
+  const w = photo.naturalWidth;
+  const h = photo.naturalHeight;
+  const blurRadius = Math.max(2, Math.round(Math.min(w, h) * 0.002));
+  const blurC = document.createElement('canvas');
+  blurC.width = w;
+  blurC.height = h;
+  const blurCtx = blurC.getContext('2d')!;
+  blurCtx.filter = `blur(${blurRadius}px)`;
+  blurCtx.drawImage(photo, 0, 0);
+  const origC = document.createElement('canvas');
+  origC.width = w;
+  origC.height = h;
+  const origCtx = origC.getContext('2d')!;
+  origCtx.drawImage(photo, 0, 0);
+  const O = origCtx.getImageData(0, 0, w, h);
+  const B = blurCtx.getImageData(0, 0, w, h);
+  const out = origCtx.createImageData(w, h);
+  const Od = O.data;
+  const Bd = B.data;
+  const Dd = out.data;
+  for (let i = 0; i < Od.length; i += 4) {
+    const lO = Od[i] * 0.299 + Od[i + 1] * 0.587 + Od[i + 2] * 0.114;
+    const lB = Bd[i] * 0.299 + Bd[i + 1] * 0.587 + Bd[i + 2] * 0.114;
+    // Amplify slightly (×1.5) so the high-freq content survives the low-alpha
+    // overlay blend and ×0.5 dampening from JPEG cache compression.
+    const v = Math.max(0, Math.min(255, 128 + (lO - lB) * 1.5));
+    Dd[i] = v;
+    Dd[i + 1] = v;
+    Dd[i + 2] = v;
+    Dd[i + 3] = 255;
+  }
+  origCtx.putImageData(out, 0, 0);
+  return origC;
+}
+
+// Cylinder-bend approximation. Re-samples the pattern bbox region of `tmp`
+// horizontally with a power-curve `src_norm = sign(out) · |out|^p` (p>1
+// compresses edges, stretches center). Visually gives the print a slight
+// "wrapped on torso" cue that flat pattern composite lacks.
+//
+// Implementation: copy bbox into a buffer, clear bbox in tmp, then redraw
+// in N vertical strips with non-linear horizontal source mapping. drawImage
+// with imageSmoothingEnabled does the bilinear sub-pixel sampling so the
+// result is smooth even at small bend magnitudes.
+//
+// Cost: ~24 drawImage calls inside bbox = ~3-5 ms per render. Skipped when
+// bendExp is 1.0 (no-op).
+function applyCylindricalBend(
+  tmp: HTMLCanvasElement,
+  bbox: { x: number; y: number; w: number; h: number },
+  bendExp: number,
+  buf: HTMLCanvasElement
+): void {
+  if (bendExp <= 1.001) return;
+  const cw = tmp.width;
+  const ch = tmp.height;
+  const x = Math.max(0, Math.floor(bbox.x));
+  const y = Math.max(0, Math.floor(bbox.y));
+  const w = Math.min(cw - x, Math.ceil(bbox.w + (bbox.x - x)));
+  const h = Math.min(ch - y, Math.ceil(bbox.h + (bbox.y - y)));
+  if (w <= 0 || h <= 0) return;
+  if (buf.width !== w || buf.height !== h) {
+    buf.width = w;
+    buf.height = h;
+  }
+  const bctx = buf.getContext('2d')!;
+  bctx.clearRect(0, 0, w, h);
+  bctx.drawImage(tmp, x, y, w, h, 0, 0, w, h);
+  const ctx = tmp.getContext('2d')!;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.clearRect(x, y, w, h);
+  const N = 24;
+  for (let i = 0; i < N; i++) {
+    const tA = (i / N) * 2 - 1;
+    const tB = ((i + 1) / N) * 2 - 1;
+    const sA = Math.sign(tA) * Math.pow(Math.abs(tA), bendExp);
+    const sB = Math.sign(tB) * Math.pow(Math.abs(tB), bendExp);
+    const outA = ((tA + 1) * 0.5) * w;
+    const outB = ((tB + 1) * 0.5) * w;
+    const srcA = ((sA + 1) * 0.5) * w;
+    const srcB = ((sB + 1) * 0.5) * w;
+    const sw = srcB - srcA;
+    const ow = outB - outA;
+    if (sw <= 0 || ow <= 0) continue;
+    ctx.drawImage(buf, srcA, 0, sw, h, x + outA, y, ow, h);
+  }
 }
 
 function ModelComposite({
@@ -342,21 +616,30 @@ function ModelComposite({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const photoRef = useRef<HTMLImageElement | null>(null);
-  const highPassRef = useRef<HTMLCanvasElement | null>(null);
   const shadingRef = useRef<HTMLCanvasElement | null>(null);
   const highlightRef = useRef<HTMLCanvasElement | null>(null);
+  const fabricRef = useRef<HTMLCanvasElement | null>(null);
+  // Reused per-render scratch canvases — avoids 4 × full-res allocations per
+  // pattern drag tick. Sized lazily to match photo dimensions.
+  const tmpRef = useRef<HTMLCanvasElement | null>(null);
+  const smRef = useRef<HTMLCanvasElement | null>(null);
+  const hmRef = useRef<HTMLCanvasElement | null>(null);
+  const fmRef = useRef<HTMLCanvasElement | null>(null);
+  // Cylinder bend's source buffer — sized to bbox, not full canvas, so it's
+  // smaller than the others. Allocated lazily.
+  const bendBufRef = useRef<HTMLCanvasElement | null>(null);
 
   // Hydrate from in-memory caches synchronously so a re-mount (e.g. modal)
   // for a previously-rendered src boots straight to 'ready' — no loading UI.
   const initPhoto = photoMemCache.get(src) ?? null;
-  const initHp = highPassMemCache.get(memHpKey(src, foldStrength)) ?? null;
   const initShading = shadingMemCache.get(src) ?? null;
   const initHighlight = highlightMemCache.get(src) ?? null;
+  const initFabric = fabricMemCache.get(src) ?? null;
   const initPose = initPhoto ? readCachedPose(src) : null;
   if (initPhoto && photoRef.current !== initPhoto) photoRef.current = initPhoto;
-  if (initHp && highPassRef.current !== initHp) highPassRef.current = initHp;
   if (initShading && shadingRef.current !== initShading) shadingRef.current = initShading;
   if (initHighlight && highlightRef.current !== initHighlight) highlightRef.current = initHighlight;
+  if (initFabric && fabricRef.current !== initFabric) fabricRef.current = initFabric;
 
   const [photoSize, setPhotoSize] = useState<{ w: number; h: number } | null>(() =>
     initPhoto ? { w: initPhoto.naturalWidth, h: initPhoto.naturalHeight } : null
@@ -367,13 +650,20 @@ function ModelComposite({
       : null
   );
   const [status, setStatus] = useState<'loading' | 'pose' | 'ready' | 'fail'>(() =>
-    initPhoto && initHp && initPose ? 'ready' : 'loading'
+    initPhoto && initShading && initHighlight && initFabric && initPose ? 'ready' : 'loading'
   );
 
   useEffect(() => {
     let cancelled = false;
     // Fast path: everything already hydrated from mem caches.
-    if (photoRef.current && highPassRef.current && quad) return;
+    if (
+      photoRef.current &&
+      shadingRef.current &&
+      highlightRef.current &&
+      fabricRef.current &&
+      quad
+    )
+      return;
 
     setStatus('loading');
     const img = photoRef.current ?? new Image();
@@ -385,36 +675,21 @@ function ModelComposite({
       photoMemCache.set(src, image);
       setPhotoSize({ w: image.naturalWidth, h: image.naturalHeight });
 
-      let hp = highPassMemCache.get(memHpKey(src, foldStrength)) ?? null;
-      if (!hp) {
-        const hpKey = `${src}|s=${foldStrength}`;
-        const cachedHp = loadCachedHighPass(hpKey);
-        if (cachedHp) {
-          await new Promise<void>((res) => {
-            if (cachedHp.complete) res();
-            else cachedHp.onload = () => res();
-          });
-          if (cancelled) return;
-          const c = document.createElement('canvas');
-          c.width = image.naturalWidth;
-          c.height = image.naturalHeight;
-          c.getContext('2d')!.drawImage(cachedHp, 0, 0, c.width, c.height);
-          hp = c;
-        } else {
-          hp = buildHighPass(image, foldStrength);
-          saveCachedHighPass(hpKey, hp);
-        }
-        highPassMemCache.set(memHpKey(src, foldStrength), hp);
-      }
-      if (cancelled) return;
-      highPassRef.current = hp;
-
-      // Shading map is foldStrength-independent (slider scales effect at
-      // render time via globalAlpha). Cache mem-only — too large for
-      // localStorage (full-res grayscale image per photo).
+      // Shading + highlight maps are foldStrength-independent (slider scales
+      // effects at render time via globalAlpha). Cache chain: mem cache →
+      // localStorage (half-res JPEG, ~50 KB each) → rebuild from photo.
+      // The localStorage tier means a page reload skips the ~100-200 ms
+      // per-photo ImageData scan and just decodes a small JPEG.
       let sh = shadingMemCache.get(src) ?? null;
       if (!sh) {
-        sh = buildShadingMap(image);
+        const cachedSh = loadCachedMap(SHADING_CACHE_PREFIX, src);
+        if (cachedSh) {
+          sh = await decodeCachedMap(cachedSh, image.naturalWidth, image.naturalHeight);
+          if (cancelled) return;
+        } else {
+          sh = buildShadingMap(image);
+          saveCachedMap(SHADING_CACHE_PREFIX, src, sh);
+        }
         shadingMemCache.set(src, sh);
       }
       if (cancelled) return;
@@ -422,11 +697,33 @@ function ModelComposite({
 
       let hl = highlightMemCache.get(src) ?? null;
       if (!hl) {
-        hl = buildHighlightMap(image);
+        const cachedHl = loadCachedMap(HIGHLIGHT_CACHE_PREFIX, src);
+        if (cachedHl) {
+          hl = await decodeCachedMap(cachedHl, image.naturalWidth, image.naturalHeight);
+          if (cancelled) return;
+        } else {
+          hl = buildHighlightMap(image);
+          saveCachedMap(HIGHLIGHT_CACHE_PREFIX, src, hl);
+        }
         highlightMemCache.set(src, hl);
       }
       if (cancelled) return;
       highlightRef.current = hl;
+
+      let fb = fabricMemCache.get(src) ?? null;
+      if (!fb) {
+        const cachedFb = loadCachedMap(FABRIC_CACHE_PREFIX, src);
+        if (cachedFb) {
+          fb = await decodeCachedMap(cachedFb, image.naturalWidth, image.naturalHeight);
+          if (cancelled) return;
+        } else {
+          fb = buildFabricTexture(image);
+          saveCachedMap(FABRIC_CACHE_PREFIX, src, fb);
+        }
+        fabricMemCache.set(src, fb);
+      }
+      if (cancelled) return;
+      fabricRef.current = fb;
 
       setStatus('pose');
       try {
@@ -457,33 +754,6 @@ function ModelComposite({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src]);
 
-  useEffect(() => {
-    if (!photoRef.current) return;
-    const memHp = highPassMemCache.get(memHpKey(src, foldStrength));
-    if (memHp) {
-      highPassRef.current = memHp;
-      return;
-    }
-    const hpKey = `${src}|s=${foldStrength}`;
-    const cached = loadCachedHighPass(hpKey);
-    if (cached) {
-      const finish = () => {
-        const c = document.createElement('canvas');
-        c.width = photoRef.current!.naturalWidth;
-        c.height = photoRef.current!.naturalHeight;
-        c.getContext('2d')!.drawImage(cached, 0, 0, c.width, c.height);
-        highPassRef.current = c;
-        highPassMemCache.set(memHpKey(src, foldStrength), c);
-      };
-      if (cached.complete) finish();
-      else cached.onload = finish;
-    } else {
-      const built = buildHighPass(photoRef.current, foldStrength);
-      highPassRef.current = built;
-      highPassMemCache.set(memHpKey(src, foldStrength), built);
-      saveCachedHighPass(hpKey, built);
-    }
-  }, [foldStrength, src]);
 
   const render = useMemo(() => {
     void foldStrength;
@@ -507,10 +777,17 @@ function ModelComposite({
       //   - affine maps source-pixel (sx, sy) into the box's image-space
       //     position inside the plate parallelogram (relU/V/W/H = where the
       //     pattern box sits in plate-fraction coords).
-      const tmp = document.createElement('canvas');
-      tmp.width = cv.width;
-      tmp.height = cv.height;
+      // tmp is reused across renders (refs) to avoid per-frame allocation
+      // and GC pressure when dragging the pattern.
+      if (!tmpRef.current) tmpRef.current = document.createElement('canvas');
+      const tmp = tmpRef.current;
+      if (tmp.width !== cv.width || tmp.height !== cv.height) {
+        tmp.width = cv.width;
+        tmp.height = cv.height;
+      }
       const tctx = tmp.getContext('2d')!;
+      tctx.setTransform(1, 0, 0, 1, 0, 0);
+      tctx.clearRect(0, 0, cv.width, cv.height);
       tctx.imageSmoothingEnabled = true;
       tctx.imageSmoothingQuality = 'high';
       tctx.save();
@@ -542,12 +819,42 @@ function ModelComposite({
       tctx.setTransform(1, 0, 0, 1, 0, 0);
       tctx.restore();
 
-      // Step 2: composite onto the photo via createPattern + fill — fill
-      // uses anti-aliased path rasterization, so the quad boundary is smooth.
+      // Step 1.5a: classify shirt and pick preset. Garment sample lazy-builds
+      // on first render after pose detect, then caches per src.
+      let garment = garmentMemCache.get(src) ?? null;
+      if (!garment) {
+        garment = sampleGarment(photo, quad);
+        garmentMemCache.set(src, garment);
+      }
+      const preset = PRESETS[classifyShirt(garment)];
+
+      const bbX0 = Math.min(quad.tl.x, quad.tr.x, quad.bl.x, quad.br.x);
+      const bbY0 = Math.min(quad.tl.y, quad.tr.y, quad.bl.y, quad.br.y);
+      const bbX1 = Math.max(quad.tl.x, quad.tr.x, quad.bl.x, quad.br.x);
+      const bbY1 = Math.max(quad.tl.y, quad.tr.y, quad.bl.y, quad.br.y);
+      const bbox = { x: bbX0, y: bbY0, w: bbX1 - bbX0, h: bbY1 - bbY0 };
+
+      // Step 1.5b: cylinder bend. Slightly compresses the pattern toward the
+      // body's left/right edges so it reads as wrapped on a torso instead of
+      // a flat sticker. Bend exponent comes from preset (~1.10-1.15). Skipped
+      // when bendExp ≤ 1.001.
+      if (!bendBufRef.current) bendBufRef.current = document.createElement('canvas');
+      applyCylindricalBend(tmp, bbox, preset.bendExp, bendBufRef.current);
+
+      // Step 1.5c: print-on-cloth blend. Mutates tmp's RGB in place (alpha
+      // untouched so step 2.5/2.6/2.7 masks still work). Iteration is bounded
+      // to the print-quad bbox — ~20% of canvas pixels, smooth on drag.
+      applyGarmentBlend(tmp, garment, preset, bbox);
+
       // Step 2: alpha-composite the pattern over the shirt (source-over).
-      // Pattern's own alpha decides coverage — opaque white shows AS white,
+      // The 0.5 px blur softens both the pattern interior (sharpness match
+      // with photo) AND the alpha edge (kills the cut-out vector edge that
+      // reads as "sticker"). Pattern's own alpha decides coverage —
       // semi-transparent edges blend softly, transparent BG keeps shirt.
+      ctx.save();
+      ctx.filter = 'blur(0.5px)';
       ctx.drawImage(tmp, 0, 0);
+      ctx.restore();
 
       // Step 2.5: vacuum-fit via hard-light with the relative-shading map.
       //
@@ -572,12 +879,17 @@ function ModelComposite({
       // step from re-introducing the grainy/rotten look that the prior
       // hard-light high-pass produced.
       if (shadingRef.current) {
-        const fitAlpha = Math.min(1.0, foldStrength * 0.7);
+        const fitAlpha = preset.foldMul * Math.min(1.0, foldStrength * 0.7);
         if (fitAlpha > 0) {
-          const sm = document.createElement('canvas');
-          sm.width = cv.width;
-          sm.height = cv.height;
+          if (!smRef.current) smRef.current = document.createElement('canvas');
+          const sm = smRef.current;
+          if (sm.width !== cv.width || sm.height !== cv.height) {
+            sm.width = cv.width;
+            sm.height = cv.height;
+          }
           const sctx = sm.getContext('2d')!;
+          sctx.globalCompositeOperation = 'source-over';
+          sctx.clearRect(0, 0, cv.width, cv.height);
           sctx.drawImage(tmp, 0, 0);
           sctx.globalCompositeOperation = 'source-in';
           sctx.drawImage(shadingRef.current, 0, 0);
@@ -596,12 +908,17 @@ function ModelComposite({
       // varying regions at byte 0 = screen identity. Low globalAlpha keeps
       // even strong bumps from washing saturation.
       if (highlightRef.current) {
-        const hlAlpha = Math.min(0.35, foldStrength * 0.15);
+        const hlAlpha = preset.hlMul * Math.min(0.35, foldStrength * 0.15);
         if (hlAlpha > 0) {
-          const hm = document.createElement('canvas');
-          hm.width = cv.width;
-          hm.height = cv.height;
+          if (!hmRef.current) hmRef.current = document.createElement('canvas');
+          const hm = hmRef.current;
+          if (hm.width !== cv.width || hm.height !== cv.height) {
+            hm.width = cv.width;
+            hm.height = cv.height;
+          }
           const hctx = hm.getContext('2d')!;
+          hctx.globalCompositeOperation = 'source-over';
+          hctx.clearRect(0, 0, cv.width, cv.height);
           hctx.drawImage(tmp, 0, 0);
           hctx.globalCompositeOperation = 'source-in';
           hctx.drawImage(highlightRef.current, 0, 0);
@@ -609,6 +926,35 @@ function ModelComposite({
           ctx.globalCompositeOperation = 'screen';
           ctx.globalAlpha = hlAlpha;
           ctx.drawImage(hm, 0, 0);
+          ctx.restore();
+        }
+      }
+
+      // Step 2.7: fabric texture overlay. Transfers the shirt's high-frequency
+      // microstructure (weave / sensor grain / lighting micro-pattern) onto
+      // the pattern. The fabric map is encoded around byte 128 = overlay
+      // identity, so flat regions of the fabric (rare on real photos) leave
+      // pattern unchanged. Strength is preset.fabricMul × foldStrength*0.5,
+      // capped low so it adds character without graying the pattern.
+      if (fabricRef.current) {
+        const fabAlpha = preset.fabricMul * Math.min(1.0, foldStrength * 0.5);
+        if (fabAlpha > 0) {
+          if (!fmRef.current) fmRef.current = document.createElement('canvas');
+          const fm = fmRef.current;
+          if (fm.width !== cv.width || fm.height !== cv.height) {
+            fm.width = cv.width;
+            fm.height = cv.height;
+          }
+          const fctx = fm.getContext('2d')!;
+          fctx.globalCompositeOperation = 'source-over';
+          fctx.clearRect(0, 0, cv.width, cv.height);
+          fctx.drawImage(tmp, 0, 0);
+          fctx.globalCompositeOperation = 'source-in';
+          fctx.drawImage(fabricRef.current, 0, 0);
+          ctx.save();
+          ctx.globalCompositeOperation = 'overlay';
+          ctx.globalAlpha = fabAlpha;
+          ctx.drawImage(fm, 0, 0);
           ctx.restore();
         }
       }

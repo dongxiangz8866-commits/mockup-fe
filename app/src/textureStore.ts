@@ -50,9 +50,22 @@ export function subscribePattern(cb: () => void): () => void {
   };
 }
 
+// rAF-coalesced notification. Pattern drag fires markTextureDirty on every
+// pointermove (60-120 Hz on modern devices). Each subscriber redraws a full-
+// resolution photo composite with multiple blends, so synchronous fan-out
+// turns drag into a slideshow. requestAnimationFrame caps notifications to
+// at most one per browser frame and lets multiple dirty events coalesce.
+let pendingNotify = false;
+const notifyListeners = () => {
+  pendingNotify = false;
+  for (const l of listeners) l();
+};
+
 export const markTextureDirty = () => {
   sharedTexture.needsUpdate = true;
-  for (const l of listeners) l();
+  if (pendingNotify) return;
+  pendingNotify = true;
+  requestAnimationFrame(notifyListeners);
 };
 
 if (import.meta.env.DEV && typeof window !== 'undefined') {
