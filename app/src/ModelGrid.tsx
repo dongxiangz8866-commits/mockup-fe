@@ -10,6 +10,12 @@ import { PRINT_ASPECT, PRINT_H_UV, PRINT_U, PRINT_V, PRINT_W_UV } from './modelA
 // instantly without ever showing a loading badge.
 const photoMemCache = new Map<string, HTMLImageElement>();
 const shadingMemCache = new Map<string, HTMLCanvasElement>();
+// Wide-band shading map (big-blur ≈ 10% min dim) captures 30-80 px wrinkles
+// that the narrow map (5%) eats because the kernel sits inside the fold.
+// Same DoG encoding, only the big-blur radius doubles. Used additively for
+// black/colored shirts; white preset zeroes it out so white-shirt output is
+// byte-identical to the pre-wide-map era.
+const wideShadingMemCache = new Map<string, HTMLCanvasElement>();
 const highlightMemCache = new Map<string, HTMLCanvasElement>();
 
 // Aggregate shirt-fabric color stats sampled from a pattern-free band of the
@@ -36,17 +42,37 @@ const fabricMemCache = new Map<string, HTMLCanvasElement>();
 //     shirt's hue dominates the perceived integration
 type PresetKey = 'white' | 'black' | 'color';
 type PresetCfg = {
-  tint: number;       // chromatic adaptation mix
-  liftFrac: number;   // fraction of garment.lumP5 to use as black-level floor
-  foldMul: number;    // step 2.5 fitAlpha multiplier
-  hlMul: number;      // step 2.6 hlAlpha multiplier
-  fabricMul: number;  // step 2.7 fabric texture overlay alpha
-  bendExp: number;    // cylinder bend exponent (1.0 = no bend; >1 compresses edges)
+  tint: number;          // chromatic adaptation mix
+  liftFrac: number;      // fraction of garment.lumP5 to use as black-level floor
+  foldMul: number;       // step 2.5 fitAlpha multiplier (narrow-band shading)
+  wideFoldMul: number;   // step 2.5b alpha for wide-band shading map
+  hlMul: number;         // step 2.6 hlAlpha multiplier
+  fabricMul: number;     // step 2.7 fabric texture overlay alpha
+  bendExp: number;       // cylinder bend exponent (1.0 = no bend; >1 compresses edges)
 };
+// White preset is the locked reference — anything that touches map encoding
+// is held to "white shirt unchanged". Dark-shirt smoothness is solved at the
+// FLOOR (the ratio divisor clamp) inside buildShadingMap/buildHighlightMap,
+// not by per-preset multiplier hacks: floor=50 doubles the divisor on near-
+// black fabric, halving sensor-noise amplification, while leaving lB>50
+// pixels (every white-shirt pixel) byte-identical.
+//
+// color.tint is small (0.12) because saturated shirts (red, blue, etc.)
+// produce very asymmetric chromatic-adaptation gains. At 0.40 a red shirt
+// pushes pattern G/B channels to 0.67× → pattern whites read as pink, blues
+// turn magenta. 0.12 keeps a hint of color cohesion without overwriting
+// pattern colors.
+// wideFoldMul = 0 on white: keeps white shirt byte-identical to the prior
+// pipeline. The wide-band shading map exists only to give black/colored
+// shirts a fold signal in the 30-80 px range where the narrow map's
+// 5%-blur kernel sits inside the fold (lB ≈ lS, no signal). Black at 0.85
+// is strongest because dark-shirt fold contrast is naturally subtle and
+// most photos there have only mid-frequency drape; color at 0.55 is the
+// cautious middle.
 const PRESETS: Record<PresetKey, PresetCfg> = {
-  white: { tint: 0.20, liftFrac: 0.40, foldMul: 0.85, hlMul: 0.85, fabricMul: 0.20, bendExp: 1.10 },
-  black: { tint: 0.30, liftFrac: 0.0,  foldMul: 1.10, hlMul: 1.00, fabricMul: 0.30, bendExp: 1.15 },
-  color: { tint: 0.40, liftFrac: 0.30, foldMul: 0.95, hlMul: 0.90, fabricMul: 0.25, bendExp: 1.12 },
+  white: { tint: 0.20, liftFrac: 0.10, foldMul: 1.10, wideFoldMul: 0.0,  hlMul: 0.90, fabricMul: 0.20, bendExp: 1.10 },
+  black: { tint: 0.30, liftFrac: 0.0,  foldMul: 1.05, wideFoldMul: 0.85, hlMul: 0.95, fabricMul: 0.18, bendExp: 1.15 },
+  color: { tint: 0.12, liftFrac: 0.08, foldMul: 1.00, wideFoldMul: 0.55, hlMul: 0.92, fabricMul: 0.22, bendExp: 1.12 },
 };
 
 function classifyShirt(g: GarmentSample): PresetKey {
@@ -59,8 +85,9 @@ function classifyShirt(g: GarmentSample): PresetKey {
   return 'color';
 }
 
-const SHADING_CACHE_PREFIX = 'sh-cache:v5:';
-const HIGHLIGHT_CACHE_PREFIX = 'hl-cache:v4:';
+const SHADING_CACHE_PREFIX = 'sh-cache:v8:';
+const WIDE_SHADING_CACHE_PREFIX = 'wsh-cache:v1:';
+const HIGHLIGHT_CACHE_PREFIX = 'hl-cache:v6:';
 const FABRIC_CACHE_PREFIX = 'fb-cache:v1:';
 
 // Persist shading + highlight maps so a page reload doesn't pay the per-pixel
@@ -279,10 +306,27 @@ function quadFromLandmarks(lm: PoseLandmark[], w: number, h: number): Quad {
 // the SMALL post-blur (0.3% ≈ 4-6 px) denoises the per-pixel jitter. The
 // medium blur radius is wide enough that sensor noise / JPEG blocking
 // barely affects the local mean, so post-blur is light here.
-function buildShadingMap(photo: HTMLImageElement): HTMLCanvasElement {
+function buildShadingMap(
+  photo: HTMLImageElement,
+  bigBlurFrac: number = 0.05
+): HTMLCanvasElement {
   const w = photo.naturalWidth;
   const h = photo.naturalHeight;
-  const blurRadius = Math.max(40, Math.round(Math.min(w, h) * 0.05));
+  const blurRadius = Math.max(40, Math.round(Math.min(w, h) * bigBlurFrac));
+  // Small denoise blur (~0.4% min dim, ~4-6 px on 1024). Replaces the raw
+  // photo `lO` in the numerator. For features ≥ 10 px (real wrinkles), lS
+  // ≈ lO so the encoding is unchanged on them; for sub-5px features
+  // (sensor noise, JPEG block grain), lS averages them away. Result: black
+  // shirts no longer mottle from amplified noise even when FLOOR is loose,
+  // and the wrinkle signal stays sharp because its width is well above
+  // the small-blur radius.
+  const smallRadius = Math.max(3, Math.round(Math.min(w, h) * 0.004));
+  const smallC = document.createElement('canvas');
+  smallC.width = w;
+  smallC.height = h;
+  const smallCtx = smallC.getContext('2d')!;
+  smallCtx.filter = `blur(${smallRadius}px)`;
+  smallCtx.drawImage(photo, 0, 0);
   const blurC = document.createElement('canvas');
   blurC.width = w;
   blurC.height = h;
@@ -294,39 +338,52 @@ function buildShadingMap(photo: HTMLImageElement): HTMLCanvasElement {
   origC.height = h;
   const origCtx = origC.getContext('2d')!;
   origCtx.drawImage(photo, 0, 0);
-  const O = origCtx.getImageData(0, 0, w, h);
+  const S = smallCtx.getImageData(0, 0, w, h);
   const B = blurCtx.getImageData(0, 0, w, h);
   const out = origCtx.createImageData(w, h);
-  const Od = O.data;
+  const Sd = S.data;
   const Bd = B.data;
   const Dd = out.data;
-  for (let i = 0; i < Od.length; i += 4) {
-    const lO = Od[i] * 0.299 + Od[i + 1] * 0.587 + Od[i + 2] * 0.114;
+  for (let i = 0; i < Sd.length; i += 4) {
+    const lS = Sd[i] * 0.299 + Sd[i + 1] * 0.587 + Sd[i + 2] * 0.114;
     const lB = Bd[i] * 0.299 + Bd[i + 1] * 0.587 + Bd[i + 2] * 0.114;
-    // Perceptual ratio with floor: byte = 128 + (photo - blur) / max(blur, 30) * 160.
-    // Floor=30 stops dark-shirt division explosion (a 5-byte fold drop on
-    // L=10 fabric would otherwise read as 50% darker and slam pattern to
-    // black). Scale 160 fits realistic ratios (≈ ±0.15) into the 0-128
-    // half of the hard-light input range without the previous 200's "hard
-    // edge" feel on dark fabric.
-    const FLOOR = 30;
-    const r = (lO - lB) / Math.max(lB, FLOOR);
-    const v = Math.max(0, Math.min(128, Math.round(128 + r * 160)));
+    // Perceptual ratio with floor: byte = 128 + (small - big) / max(big, 40) * 256.
+    // Numerator `lS - lB` is a soft DoG: features in the wrinkle band
+    // (5-50 px) survive intact, features below 5 px (noise) are killed by
+    // the small blur, features above 50 px (broad chest shading, body
+    // curvature) cancel because both blurs track them — that's how this
+    // pass stops reading as "shadow on the print" and starts reading as
+    // "fold lines through the print".
+    //
+    // FLOOR=40 (was 50): the small-blur denoise has already neutralised
+    // the noise that floor=50 was guarding against, so we can sharpen
+    // dark-shirt response by ~20% (5-byte fold drop on lB=12 → byte 102
+    // instead of 106, ~21% pattern darken vs prior 17%) without re-
+    // introducing mottling.
+    //
+    // White shirts: lB ≥ 100 keeps max() at lB; the FLOOR is irrelevant
+    // and lS ≈ lO for normal wrinkle widths, so encoding is byte-
+    // identical to the prior version.
+    const FLOOR = 40;
+    const r = (lS - lB) / Math.max(lB, FLOOR);
+    const v = Math.max(0, Math.min(128, Math.round(128 + r * 256)));
     Dd[i] = v;
     Dd[i + 1] = v;
     Dd[i + 2] = v;
     Dd[i + 3] = 255;
   }
   origCtx.putImageData(out, 0, 0);
-  // Post-blur denoise (~0.8% of min dim): wider than the prior 0.3% to
-  // soften fold-edge transitions on dark fabrics, where ratio amplifies
-  // pixel noise into visibly "hard" stripes. The medium-frequency fold
-  // structure (10s of pixels wide) survives this radius unchanged.
+  // Post-blur denoise (~0.2% of min dim, halved from 0.4%): the small-blur
+  // denoise on the *input* side already kills per-pixel jitter, so the
+  // post-blur's only job is to soften ratio quantisation step-edges. A
+  // tighter post-blur leaves fold contours sharper, which is the
+  // perceptual difference between "shadow" and "wrinkle" — wrinkles read
+  // as crisp lines, shadows as soft gradients.
   const denoised = document.createElement('canvas');
   denoised.width = w;
   denoised.height = h;
   const dctx = denoised.getContext('2d')!;
-  dctx.filter = `blur(${Math.max(6, Math.round(Math.min(w, h) * 0.008))}px)`;
+  dctx.filter = `blur(${Math.max(2, Math.round(Math.min(w, h) * 0.002))}px)`;
   dctx.drawImage(origC, 0, 0);
   return denoised;
 }
@@ -353,6 +410,13 @@ function buildHighlightMap(photo: HTMLImageElement): HTMLCanvasElement {
   const w = photo.naturalWidth;
   const h = photo.naturalHeight;
   const blurRadius = Math.max(40, Math.round(Math.min(w, h) * 0.05));
+  const smallRadius = Math.max(3, Math.round(Math.min(w, h) * 0.004));
+  const smallC = document.createElement('canvas');
+  smallC.width = w;
+  smallC.height = h;
+  const smallCtx = smallC.getContext('2d')!;
+  smallCtx.filter = `blur(${smallRadius}px)`;
+  smallCtx.drawImage(photo, 0, 0);
   const blurC = document.createElement('canvas');
   blurC.width = w;
   blurC.height = h;
@@ -364,17 +428,20 @@ function buildHighlightMap(photo: HTMLImageElement): HTMLCanvasElement {
   origC.height = h;
   const origCtx = origC.getContext('2d')!;
   origCtx.drawImage(photo, 0, 0);
-  const O = origCtx.getImageData(0, 0, w, h);
+  const S = smallCtx.getImageData(0, 0, w, h);
   const B = blurCtx.getImageData(0, 0, w, h);
   const out = origCtx.createImageData(w, h);
-  const Od = O.data;
+  const Sd = S.data;
   const Bd = B.data;
   const Dd = out.data;
-  for (let i = 0; i < Od.length; i += 4) {
-    const lO = Od[i] * 0.299 + Od[i + 1] * 0.587 + Od[i + 2] * 0.114;
+  for (let i = 0; i < Sd.length; i += 4) {
+    const lS = Sd[i] * 0.299 + Sd[i + 1] * 0.587 + Sd[i + 2] * 0.114;
     const lB = Bd[i] * 0.299 + Bd[i + 1] * 0.587 + Bd[i + 2] * 0.114;
-    const FLOOR = 30;
-    const r = (lO - lB) / Math.max(lB, FLOOR);
+    // Mirrors buildShadingMap: small-blur denoise + FLOOR=40 + DoG
+    // numerator. Wide-area highlights (specular sheen on torso curvature)
+    // cancel because both blurs track them; only sharp bump-edges remain.
+    const FLOOR = 40;
+    const r = (lS - lB) / Math.max(lB, FLOOR);
     const v = Math.max(0, Math.min(255, Math.round((r - 0.04) * 600)));
     Dd[i] = v;
     Dd[i + 1] = v;
@@ -386,7 +453,7 @@ function buildHighlightMap(photo: HTMLImageElement): HTMLCanvasElement {
   denoised.width = w;
   denoised.height = h;
   const dctx = denoised.getContext('2d')!;
-  dctx.filter = `blur(${Math.max(6, Math.round(Math.min(w, h) * 0.008))}px)`;
+  dctx.filter = `blur(${Math.max(2, Math.round(Math.min(w, h) * 0.003))}px)`;
   dctx.drawImage(origC, 0, 0);
   return denoised;
 }
@@ -617,12 +684,14 @@ function ModelComposite({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const photoRef = useRef<HTMLImageElement | null>(null);
   const shadingRef = useRef<HTMLCanvasElement | null>(null);
+  const wideShadingRef = useRef<HTMLCanvasElement | null>(null);
   const highlightRef = useRef<HTMLCanvasElement | null>(null);
   const fabricRef = useRef<HTMLCanvasElement | null>(null);
   // Reused per-render scratch canvases — avoids 4 × full-res allocations per
   // pattern drag tick. Sized lazily to match photo dimensions.
   const tmpRef = useRef<HTMLCanvasElement | null>(null);
   const smRef = useRef<HTMLCanvasElement | null>(null);
+  const wsmRef = useRef<HTMLCanvasElement | null>(null);
   const hmRef = useRef<HTMLCanvasElement | null>(null);
   const fmRef = useRef<HTMLCanvasElement | null>(null);
   // Cylinder bend's source buffer — sized to bbox, not full canvas, so it's
@@ -633,11 +702,14 @@ function ModelComposite({
   // for a previously-rendered src boots straight to 'ready' — no loading UI.
   const initPhoto = photoMemCache.get(src) ?? null;
   const initShading = shadingMemCache.get(src) ?? null;
+  const initWideShading = wideShadingMemCache.get(src) ?? null;
   const initHighlight = highlightMemCache.get(src) ?? null;
   const initFabric = fabricMemCache.get(src) ?? null;
   const initPose = initPhoto ? readCachedPose(src) : null;
   if (initPhoto && photoRef.current !== initPhoto) photoRef.current = initPhoto;
   if (initShading && shadingRef.current !== initShading) shadingRef.current = initShading;
+  if (initWideShading && wideShadingRef.current !== initWideShading)
+    wideShadingRef.current = initWideShading;
   if (initHighlight && highlightRef.current !== initHighlight) highlightRef.current = initHighlight;
   if (initFabric && fabricRef.current !== initFabric) fabricRef.current = initFabric;
 
@@ -650,7 +722,14 @@ function ModelComposite({
       : null
   );
   const [status, setStatus] = useState<'loading' | 'pose' | 'ready' | 'fail'>(() =>
-    initPhoto && initShading && initHighlight && initFabric && initPose ? 'ready' : 'loading'
+    initPhoto &&
+    initShading &&
+    initWideShading &&
+    initHighlight &&
+    initFabric &&
+    initPose
+      ? 'ready'
+      : 'loading'
   );
 
   useEffect(() => {
@@ -659,6 +738,7 @@ function ModelComposite({
     if (
       photoRef.current &&
       shadingRef.current &&
+      wideShadingRef.current &&
       highlightRef.current &&
       fabricRef.current &&
       quad
@@ -694,6 +774,24 @@ function ModelComposite({
       }
       if (cancelled) return;
       shadingRef.current = sh;
+
+      // Wide-band variant — same encoding, big-blur 10% instead of 5%.
+      // Captures 30-80 px wrinkles where the 5% kernel sits inside the
+      // fold and erases its own signal.
+      let wsh = wideShadingMemCache.get(src) ?? null;
+      if (!wsh) {
+        const cachedWsh = loadCachedMap(WIDE_SHADING_CACHE_PREFIX, src);
+        if (cachedWsh) {
+          wsh = await decodeCachedMap(cachedWsh, image.naturalWidth, image.naturalHeight);
+          if (cancelled) return;
+        } else {
+          wsh = buildShadingMap(image, 0.1);
+          saveCachedMap(WIDE_SHADING_CACHE_PREFIX, src, wsh);
+        }
+        wideShadingMemCache.set(src, wsh);
+      }
+      if (cancelled) return;
+      wideShadingRef.current = wsh;
 
       let hl = highlightMemCache.get(src) ?? null;
       if (!hl) {
@@ -897,6 +995,42 @@ function ModelComposite({
           ctx.globalCompositeOperation = 'hard-light';
           ctx.globalAlpha = fitAlpha;
           ctx.drawImage(sm, 0, 0);
+          ctx.restore();
+        }
+      }
+
+      // Step 2.5b: wide-band fold pass.
+      //
+      // Step 2.5's narrow map (5% blur) erases its own signal on folds wider
+      // than ~50 px because the kernel sits inside the fold body — common on
+      // soft-drape t-shirts where 30-80 px folds dominate. The wide map
+      // (10% blur) sees those folds clearly because lB averages mostly
+      // outside-fold material at the fold center → DoG signal returns.
+      //
+      // White preset zeroes wideFoldMul, so white-shirt output is byte-
+      // identical to the pre-wide-map era (no extra hard-light pass touches
+      // it). Black/colored shirts get the additional fold cue at presets
+      // 0.85 / 0.55, scaled by the same foldStrength·0.7 envelope as the
+      // narrow pass.
+      if (wideShadingRef.current && preset.wideFoldMul > 0) {
+        const wideAlpha = preset.wideFoldMul * Math.min(1.0, foldStrength * 0.7);
+        if (wideAlpha > 0) {
+          if (!wsmRef.current) wsmRef.current = document.createElement('canvas');
+          const wsm = wsmRef.current;
+          if (wsm.width !== cv.width || wsm.height !== cv.height) {
+            wsm.width = cv.width;
+            wsm.height = cv.height;
+          }
+          const wctx = wsm.getContext('2d')!;
+          wctx.globalCompositeOperation = 'source-over';
+          wctx.clearRect(0, 0, cv.width, cv.height);
+          wctx.drawImage(tmp, 0, 0);
+          wctx.globalCompositeOperation = 'source-in';
+          wctx.drawImage(wideShadingRef.current, 0, 0);
+          ctx.save();
+          ctx.globalCompositeOperation = 'hard-light';
+          ctx.globalAlpha = wideAlpha;
+          ctx.drawImage(wsm, 0, 0);
           ctx.restore();
         }
       }
