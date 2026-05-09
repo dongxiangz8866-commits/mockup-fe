@@ -146,3 +146,33 @@ type PresetCfg = {
 - 印花板 quad 来自 MediaPipe Pose 的 4 个关键点，对侧身 / 手举起 / 极端姿势鲁棒性差
 - shading map 上限 128，凸起感全靠 Step 2.6 screen + Step 2.7 fabric 兜底，比真 hard-light 提亮要弱
 - preset 只有 3 档（white/black/color），深色彩衫（暗红、深蓝）和亮色彩衫共用同一档
+
+## 失败方案档案（避免重复踩坑）
+
+下面这几条都试过，**回归到 e7014a3 之前的纯 Canvas2D 双频段 shading 路线最稳**。
+
+### A. MediaPipe ImageSegmenter 衫 mask（confidence 0.25–0.55 软阈值）
+**做法**：multi-class selfie 段，clothes 通道软阈值 → alpha mask，destination-in 切印花。  
+**结果**：白衫白背景边界 confidence 模糊，掉块风险高；正常背景下边缘比 quad 切干净。  
+**结论**：边界场景不稳，纯 4 点 quad 切的退化版本反而更鲁棒。要"精准 mask"得上 SAM/SAM2，浏览器跑不动。
+
+### B. 浏览器 Depth Anything V2 Small 推位移
+**做法**：`@huggingface/transformers` 跑 25 MB ONNX，输出深度灰度 → wsh 梯度 → R/G displace map → resample 印花 quad。  
+**结果**：深度模型只看得到**身体宏观 3D**（胸口大致凸出），看不到布料**微观褶皱**。胸口 disp viz 是大片均匀褐色（局部梯度 ≈ 0），印花视觉无变化。  
+**结论**：深度推位移对"印花跟着褶皱弯"无效——褶皱细节根本不在 DAv2 输出范围内。要这个细节级别得上 Sapiens-Normal（1B 参数，浏览器跑不动）或后端 GPU。
+
+### C. WebGL fragment shader 一次性合成（含 SharedGL 单例 + drawImage 拷贝）
+**做法**：把 hard-light / wide-shading / highlight / fabric / displace / garment-blend 全部端到端合成进一个 GLSL fragment shader；module 级单例 GL context 走 offscreen + Canvas2D drawImage 分发到各 thumb。  
+**结果**：
+- ❌ **比 Canvas2D 更卡**——drawImage 从 WebGL canvas 到 Canvas2D 涉及 GPU→CPU readback，每张 thumb 多一次 sync，整体反而比纯 Canvas2D 慢
+- ❌ 黑衫看着还是纯阴影——shader 只是把同样的数学搬到 GPU 跑，没改算法，结果当然一样
+- ❌ 白衫图案有掉块——hard-light 的 alpha clamp 边界 + garment blend 公式精度跟 Canvas2D globalAlpha+globalCompositeOperation 路径有微小差异，叠加 SharedGL drawImage 路径在某些 RGB 区间出问题  
+
+**结论**：Recraft 那种"丝滑"靠的是**后端预烘 4 张资产** + 前端 WebGL displace shader，**不是把现有 2D 数学翻译成 shader**。在我们这个"美工 0 + 后端 0"的约束下，**纯 shader 化对最终效果零增益**，反而引入新的渲染路径 bug。
+
+### D. 路径推断（未来可能采纳）
+按可行性 / 成本 / 上限排序：
+1. **接 Recraft API（路线 K1）**——半天，30 张/天免费，质量 = Recraft 本人
+2. **Replicate SDXL inpaint + IP-Adapter（路线 H）**——1–2 天，可定制，~$0.005–0.05/张
+3. **自烘 1 件四件套（PS）+ pixi.js displacement filter**（路线 C）——美工 1–2 小时/件，质量 Recraft 同档但需积累模板库
+4. **自建 ComfyUI 服务跑 Sapiens-Normal**——周级工时 + ~$300/月 GPU，能复现 Recraft 自动烘流水线，长尾需求
