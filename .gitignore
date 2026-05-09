@@ -38,3 +38,7 @@ app/public/mock-models/obj-with-model/
 app/public/mock-models/obj-no-model/
 app/public/mock-models/fbx-with-model/
 app/public/mock-models/fbx-no-model/
+
+# Playwright screenshot harness state and outputs (regenerated on demand)
+app/.playwright-cache/
+app/screenshots/

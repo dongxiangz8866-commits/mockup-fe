@@ -42,13 +42,16 @@ const fabricMemCache = new Map<string, HTMLCanvasElement>();
 //     shirt's hue dominates the perceived integration
 type PresetKey = 'white' | 'black' | 'color';
 type PresetCfg = {
-  tint: number;          // chromatic adaptation mix
-  liftFrac: number;      // fraction of garment.lumP5 to use as black-level floor
-  foldMul: number;       // step 2.5 fitAlpha multiplier (narrow-band shading)
-  wideFoldMul: number;   // step 2.5b alpha for wide-band shading map
-  hlMul: number;         // step 2.6 hlAlpha multiplier
-  fabricMul: number;     // step 2.7 fabric texture overlay alpha
-  bendExp: number;       // cylinder bend exponent (1.0 = no bend; >1 compresses edges)
+  tint: number;             // chromatic adaptation mix
+  liftFrac: number;         // fraction of garment.lumP5 to use as black-level floor
+  liftMin: number;          // absolute byte floor for pattern lift (overrides liftFrac when larger). Dark shirts: ≥55 so pattern blacks don't merge with shirt's near-black background.
+  foldMul: number;          // step 2.5 fitAlpha multiplier (narrow-band shading)
+  wideFoldMul: number;      // step 2.5b alpha for wide-band shading map
+  hlMul: number;            // step 2.6 hlAlpha multiplier
+  fabricMul: number;        // step 2.7 fabric texture overlay alpha
+  bendExp: number;          // cylinder bend exponent (1.0 = no bend; >1 compresses edges)
+  edgeShadowPx: number;     // step 1.5d inner-shadow blur radius (pattern edge → cloth)
+  edgeShadowAlpha: number;  // step 1.5d inner-shadow strength (0 disables — white preserves invariance)
 };
 // White preset is the locked reference — anything that touches map encoding
 // is held to "white shirt unchanged". Dark-shirt smoothness is solved at the
@@ -69,10 +72,20 @@ type PresetCfg = {
 // is strongest because dark-shirt fold contrast is naturally subtle and
 // most photos there have only mid-frequency drape; color at 0.55 is the
 // cautious middle.
+// black preset (now ACTUALLY reachable after classifyShirt fix):
+//   liftMin=50  pattern dark content lifted above shirt's byte 5-30 range
+//               so the cat-illustration smoke / silhouette does not merge
+//               into a single black blob. Cost: ~20% pattern contrast loss,
+//               worth it to preserve pattern shape on dark fabric.
+//   foldMul=0.40 / wideFoldMul=0.20  mild fold cue. Combined with A1's
+//               [10,120] DoG amplification this gives visible fold lines on
+//               bright pattern areas without crushing dark areas.
+//   hlMul=0.50  modest bump highlight (was 0.95 — too aggressive when paired
+//               with lift). fabricMul=0.15 keeps shirt grain transfer subtle.
 const PRESETS: Record<PresetKey, PresetCfg> = {
-  white: { tint: 0.20, liftFrac: 0.10, foldMul: 1.10, wideFoldMul: 0.0,  hlMul: 0.90, fabricMul: 0.20, bendExp: 1.10 },
-  black: { tint: 0.30, liftFrac: 0.0,  foldMul: 1.05, wideFoldMul: 0.85, hlMul: 0.95, fabricMul: 0.18, bendExp: 1.15 },
-  color: { tint: 0.12, liftFrac: 0.08, foldMul: 1.00, wideFoldMul: 0.55, hlMul: 0.92, fabricMul: 0.22, bendExp: 1.12 },
+  white: { tint: 0.20, liftFrac: 0.10, liftMin: 0,  foldMul: 1.10, wideFoldMul: 0.0,  hlMul: 0.90, fabricMul: 0.20, bendExp: 1.10, edgeShadowPx: 1.5, edgeShadowAlpha: 0.0 },
+  black: { tint: 0.30, liftFrac: 0.0,  liftMin: 50, foldMul: 0.40, wideFoldMul: 0.20, hlMul: 0.50, fabricMul: 0.15, bendExp: 1.15, edgeShadowPx: 2.0, edgeShadowAlpha: 0.0 },
+  color: { tint: 0.12, liftFrac: 0.08, liftMin: 0,  foldMul: 1.00, wideFoldMul: 0.55, hlMul: 0.92, fabricMul: 0.22, bendExp: 1.12, edgeShadowPx: 1.5, edgeShadowAlpha: 0.0 },
 };
 
 function classifyShirt(g: GarmentSample): PresetKey {
@@ -80,13 +93,27 @@ function classifyShirt(g: GarmentSample): PresetKey {
   const max = Math.max(r, gr, b);
   const min = Math.min(r, gr, b);
   const sat = max > 0 ? (max - min) / max : 0;
-  if (g.lumP95 > 200 && sat < 0.10) return 'white';
-  if (g.lumP95 < 70 && sat < 0.25) return 'black';
-  return 'color';
+  let key: PresetKey;
+  // 'black' preset is misnamed — it now covers ALL dark shirts (true black,
+  // dark green, deep red, navy, deep purple, etc.) because the same lift /
+  // mild-fold treatment fixes the "dark pattern interior merges into shirt"
+  // failure mode regardless of the shirt's hue. lumP95<90 captures dark
+  // shirts cleanly while leaving medium-tone colored shirts (lumP95≥90)
+  // on the default 'color' path. The earlier `lumP95<70 && sat<0.25` rule
+  // misclassified pure black (sat=0.36 due to byte quantisation noise) AND
+  // dark colored shirts (sat>0.25 by design), pushing both to 'color' →
+  // pattern dark interior crushed and visible as a smudge.
+  if (g.lumP95 > 200 && sat < 0.10) key = 'white';
+  else if (g.lumP95 < 90) key = 'black';
+  else key = 'color';
+  if (import.meta.env.DEV) {
+    console.log(`[classify] rgb=(${r.toFixed(0)},${gr.toFixed(0)},${b.toFixed(0)}) lumP5=${g.lumP5.toFixed(0)} lumP95=${g.lumP95.toFixed(0)} sat=${sat.toFixed(2)} → ${key}`);
+  }
+  return key;
 }
 
-const SHADING_CACHE_PREFIX = 'sh-cache:v8:';
-const WIDE_SHADING_CACHE_PREFIX = 'wsh-cache:v1:';
+const SHADING_CACHE_PREFIX = 'sh-cache:v12:';
+const WIDE_SHADING_CACHE_PREFIX = 'wsh-cache:v5:';
 const HIGHLIGHT_CACHE_PREFIX = 'hl-cache:v6:';
 const FABRIC_CACHE_PREFIX = 'fb-cache:v1:';
 
@@ -274,6 +301,148 @@ function quadFromLandmarks(lm: PoseLandmark[], w: number, h: number): Quad {
   };
 }
 
+type ShadingInput = HTMLImageElement | HTMLCanvasElement;
+
+function shadingInputDims(s: ShadingInput): { w: number; h: number } {
+  return s instanceof HTMLImageElement
+    ? { w: s.naturalWidth, h: s.naturalHeight }
+    : { w: s.width, h: s.height };
+}
+
+// Sample luminance percentiles inside the print quad — pixels guaranteed to
+// be on-shirt because the quad is built from MediaPipe Pose's shoulder/hip
+// landmarks. 64×64 bilinearly-interpolated samples (4096 pixels) are plenty
+// for stable percentile estimates and run in <2 ms on a full-res photo.
+function sampleShirtQuadLums(
+  photo: HTMLImageElement,
+  quad: Quad
+): { p10: number; p50: number; p90: number } {
+  const w = photo.naturalWidth;
+  const h = photo.naturalHeight;
+  const off = document.createElement('canvas');
+  off.width = w;
+  off.height = h;
+  const ctx = off.getContext('2d')!;
+  ctx.drawImage(photo, 0, 0);
+  const data = ctx.getImageData(0, 0, w, h).data;
+  // Bilinear quad parametrisation: p(u,v) = tl + u·U + v·V + u·v·C.
+  const ux = quad.tr.x - quad.tl.x;
+  const uy = quad.tr.y - quad.tl.y;
+  const vx = quad.bl.x - quad.tl.x;
+  const vy = quad.bl.y - quad.tl.y;
+  const cx = quad.br.x - quad.tr.x - quad.bl.x + quad.tl.x;
+  const cy = quad.br.y - quad.tr.y - quad.bl.y + quad.tl.y;
+  const N = 64;
+  const lums: number[] = [];
+  for (let i = 0; i < N; i++) {
+    const u = (i + 0.5) / N;
+    for (let j = 0; j < N; j++) {
+      const v = (j + 0.5) / N;
+      const px = Math.round(quad.tl.x + u * ux + v * vx + u * v * cx);
+      const py = Math.round(quad.tl.y + u * uy + v * vy + u * v * cy);
+      if (px < 0 || px >= w || py < 0 || py >= h) continue;
+      const k = (py * w + px) * 4;
+      lums.push(data[k] * 0.299 + data[k + 1] * 0.587 + data[k + 2] * 0.114);
+    }
+  }
+  if (lums.length === 0) return { p10: 0, p50: 128, p90: 255 };
+  lums.sort((a, b) => a - b);
+  return {
+    p10: lums[Math.floor(lums.length * 0.10)],
+    p50: lums[Math.floor(lums.length * 0.50)],
+    p90: lums[Math.floor(lums.length * 0.90)],
+  };
+}
+
+// Stretch a dark photo's luminance into a useful range before DoG runs.
+// Black/dark shirts compress most of their luminance into ~[5, 30], so the
+// (lS − lB) numerator can only swing a few bytes and the FLOOR=40 in the
+// shading-map ratio further dampens the response. Re-mapping the shirt's
+// [P10, P90] to [10, 210] expands the working range ~10× without touching
+// the 高频 fold cue: per-channel multiplicative gain preserves hue, and the
+// small-blur denoise inside buildShadingMap still kills sub-5 px noise that
+// the stretch would otherwise amplify.
+//
+// Why pose-quad sampling (and not central-region): an early version sampled
+// 30-70 % W × 30-70 % H of the photo, but for portraits that band catches
+// face + bright background and lifts P95 above 80 even on near-black
+// shirts (real measurement: black.png p95=168). Sampling INSIDE the print
+// quad — built from shoulder/hip landmarks — gives shirt-only pixels.
+//
+// White-shirt invariance contract (docs/synthesis-pipeline.md §"⚠ 白衫不变性
+// 合约"): photos with quad-region P50 ≥ 80 short-circuit and return the
+// original HTMLImageElement, so buildShadingMap's input is byte-identical.
+// White / light / pastel shirts hit this branch (P50 ≈ 200-240).
+//
+// Narrow-range guard (P90 − P10 < 10): stretching a near-uniform region
+// would mostly amplify sensor noise; skip the stretch in that pathological
+// case so the result reverts to the existing FLOOR-clamped behaviour.
+//
+// Pose-fail fallback: if the quad is null (pose detection missed), no
+// reliable shirt sample is available — return the photo unchanged, equiv
+// to A1 disabled. Affects ~5 % of inputs; degraded gracefully.
+function preprocessForShading(
+  photo: HTMLImageElement,
+  shirtQuad: Quad | null
+): ShadingInput {
+  if (!shirtQuad) {
+    if (import.meta.env.DEV) {
+      const tag = photo.src?.split('/').pop() ?? '?';
+      console.log(`[A1] skip(no-pose) ${tag}`);
+    }
+    return photo;
+  }
+
+  const stats = sampleShirtQuadLums(photo, shirtQuad);
+  const { p10, p50, p90 } = stats;
+
+  if (import.meta.env.DEV) {
+    const tag = photo.src?.split('/').pop() ?? '?';
+    const fmt = (n: number) => n.toFixed(0);
+    if (p50 >= 80) {
+      console.log(`[A1] skip(bright) ${tag} p50=${fmt(p50)} p10=${fmt(p10)} p90=${fmt(p90)}`);
+    } else if (p90 - p10 < 10) {
+      console.log(`[A1] skip(narrow) ${tag} p50=${fmt(p50)} p10=${fmt(p10)} p90=${fmt(p90)}`);
+    } else {
+      console.log(`[A1] stretch ${tag} p50=${fmt(p50)} p10=${fmt(p10)} p90=${fmt(p90)} → [10,120]`);
+    }
+  }
+  if (p50 >= 80) return photo;
+  if (p90 - p10 < 10) return photo;
+
+  const w = photo.naturalWidth;
+  const h = photo.naturalHeight;
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d')!;
+  ctx.drawImage(photo, 0, 0);
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  // Conservative target: black-shirt [P10, P90] of [4, 25] → [10, 120] is a
+  // ~5× contrast amplification (from raw 21-byte spread to 110). An earlier
+  // version targeted [10, 210] (~10× amp) and over-shot — fold lines went
+  // from "subtle visible" to "black smudge" in real photos with complex
+  // multi-element illustrations, where the amplified DoG signal compounds
+  // with the pattern's own dark interior.
+  const TARGET_LO = 10;
+  const TARGET_HI = 120;
+  const scale = (TARGET_HI - TARGET_LO) / Math.max(1, p90 - p10);
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i];
+    const g = d[i + 1];
+    const b = d[i + 2];
+    const l = r * 0.299 + g * 0.587 + b * 0.114;
+    const lp = TARGET_LO + (l - p10) * scale;
+    const gain = lp / Math.max(l, 1);
+    d[i] = Math.max(0, Math.min(255, r * gain));
+    d[i + 1] = Math.max(0, Math.min(255, g * gain));
+    d[i + 2] = Math.max(0, Math.min(255, b * gain));
+  }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
 // Per-pixel PERCEPTUAL-RATIO shading map: encodes the relative luminance
 // change `(photo − blur) / max(blur, FLOOR)` around byte 128 (hard-light
 // identity). Folds → byte < 128 → hard-light darkens pattern.
@@ -307,11 +476,10 @@ function quadFromLandmarks(lm: PoseLandmark[], w: number, h: number): Quad {
 // medium blur radius is wide enough that sensor noise / JPEG blocking
 // barely affects the local mean, so post-blur is light here.
 function buildShadingMap(
-  photo: HTMLImageElement,
+  photo: ShadingInput,
   bigBlurFrac: number = 0.05
 ): HTMLCanvasElement {
-  const w = photo.naturalWidth;
-  const h = photo.naturalHeight;
+  const { w, h } = shadingInputDims(photo);
   const blurRadius = Math.max(40, Math.round(Math.min(w, h) * bigBlurFrac));
   // Small denoise blur (~0.4% min dim, ~4-6 px on 1024). Replaces the raw
   // photo `lO` in the numerator. For features ≥ 10 px (real wrinkles), lS
@@ -555,8 +723,18 @@ function applyGarmentBlend(
   const d = img.data;
   const [gr, gg, gb] = garment.rgb;
   const gMax = Math.max(gr, gg, gb, 1);
-  const lift = garment.lumP5 * preset.liftFrac;
+  // lift floor: max(garment-relative, absolute-byte). The relative term
+  // (lumP5 * liftFrac) handles the white-shirt "vector ink" cue (pattern
+  // blacks must not sink below shirt's shadow level). The absolute term
+  // (liftMin) handles the dark-shirt "invisible blob" cue (pattern blacks
+  // must be visibly above shirt's mid-tone). White: lumP5*liftFrac=22
+  // dominates over liftMin=0 (no change). Black: liftMin=55+ dominates over
+  // lumP5*liftFrac=0 (pattern lifted to liftMin).
+  const lift = Math.max(garment.lumP5 * preset.liftFrac, preset.liftMin);
   const liftScale = (255 - lift) / 255;
+  if (import.meta.env.DEV) {
+    console.log(`[blend] lift=${lift.toFixed(0)} liftMin=${preset.liftMin} foldMul=${preset.foldMul} wideFoldMul=${preset.wideFoldMul} fabricMul=${preset.fabricMul}`);
+  }
   const cR = 1 - preset.tint * (1 - gr / gMax);
   const cG = 1 - preset.tint * (1 - gg / gMax);
   const cB = 1 - preset.tint * (1 - gb / gMax);
@@ -668,6 +846,68 @@ function applyCylindricalBend(
   }
 }
 
+// Soft inner shadow on the pattern's alpha edge — kills the "vector cut-out
+// sticker" cue by darkening a 1.5-2 px ring inside the alpha boundary so the
+// print reads as ink absorbed into cloth at its border instead of a decal
+// sitting flat on top.
+//
+// Recipe: Porter-Duff in three composite ops, no per-pixel JS.
+//   buf := tmp's bbox region (RGB+alpha)
+//   buf := buf with RGB replaced by translucent black, masked to original
+//          alpha (source-in fill)
+//   buf := buf MINUS blurred(tmp) (destination-out) — the blurred alpha is a
+//          slightly-eroded version of the pattern shape; subtracting it from
+//          the full-shape black leaves only the soft inner-edge ring.
+//   tmp := tmp with `source-atop drawImage(buf)` — paints the ring onto tmp
+//          only where tmp has alpha (no spill into the cloth area).
+//
+// Cost: 4 drawImage + 1 fillRect on a bbox-sized buffer (~250×400 typical) ≈
+// 2-4 ms per render. Skipped entirely when alpha ≤ 0 (white preset) or
+// when blur ≤ 0.
+function applyEdgeInnerShadow(
+  tmp: HTMLCanvasElement,
+  bbox: { x: number; y: number; w: number; h: number },
+  blurPx: number,
+  strength: number,
+  buf: HTMLCanvasElement
+): void {
+  if (strength <= 0 || blurPx <= 0) return;
+  const cw = tmp.width;
+  const ch = tmp.height;
+  const x = Math.max(0, Math.floor(bbox.x));
+  const y = Math.max(0, Math.floor(bbox.y));
+  const w = Math.min(cw - x, Math.ceil(bbox.w + (bbox.x - x)));
+  const h = Math.min(ch - y, Math.ceil(bbox.h + (bbox.y - y)));
+  if (w <= 0 || h <= 0) return;
+  if (buf.width !== w || buf.height !== h) {
+    buf.width = w;
+    buf.height = h;
+  }
+  const bctx = buf.getContext('2d')!;
+  bctx.setTransform(1, 0, 0, 1, 0, 0);
+  bctx.filter = 'none';
+  bctx.globalCompositeOperation = 'source-over';
+  bctx.clearRect(0, 0, w, h);
+
+  bctx.drawImage(tmp, x, y, w, h, 0, 0, w, h);
+
+  bctx.globalCompositeOperation = 'source-in';
+  bctx.fillStyle = `rgba(0,0,0,${strength})`;
+  bctx.fillRect(0, 0, w, h);
+
+  bctx.globalCompositeOperation = 'destination-out';
+  bctx.filter = `blur(${blurPx}px)`;
+  bctx.drawImage(tmp, x, y, w, h, 0, 0, w, h);
+  bctx.filter = 'none';
+  bctx.globalCompositeOperation = 'source-over';
+
+  const ctx = tmp.getContext('2d')!;
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-atop';
+  ctx.drawImage(buf, 0, 0, w, h, x, y, w, h);
+  ctx.restore();
+}
+
 function ModelComposite({
   src,
   foldStrength,
@@ -697,6 +937,7 @@ function ModelComposite({
   // Cylinder bend's source buffer — sized to bbox, not full canvas, so it's
   // smaller than the others. Allocated lazily.
   const bendBufRef = useRef<HTMLCanvasElement | null>(null);
+  const edgeShadowBufRef = useRef<HTMLCanvasElement | null>(null);
 
   // Hydrate from in-memory caches synchronously so a re-mount (e.g. modal)
   // for a previously-rendered src boots straight to 'ready' — no loading UI.
@@ -755,11 +996,38 @@ function ModelComposite({
       photoMemCache.set(src, image);
       setPhotoSize({ w: image.naturalWidth, h: image.naturalHeight });
 
+      // Pose first: gives us the print quad which doubles as the shirt
+      // sampling region for the shading-map preprocess (luminance stretch
+      // on dark shirts). Without pose, the central-region heuristic was
+      // unreliable — face + background lift the percentile above the dark-
+      // shirt threshold. Pose is ~1-2 s cold but <5 ms cached.
+      setStatus('pose');
+      let lm: PoseLandmark[] | null = null;
+      try {
+        lm = await detectPoseCached(image, src);
+      } catch (e) {
+        if (cancelled) return;
+        console.warn('pose fail', e);
+      }
+      if (cancelled) return;
+      const detectedQuad = lm
+        ? quadFromLandmarks(lm, image.naturalWidth, image.naturalHeight)
+        : null;
+
       // Shading + highlight maps are foldStrength-independent (slider scales
       // effects at render time via globalAlpha). Cache chain: mem cache →
       // localStorage (half-res JPEG, ~50 KB each) → rebuild from photo.
       // The localStorage tier means a page reload skips the ~100-200 ms
       // per-photo ImageData scan and just decodes a small JPEG.
+      //
+      // Lazy preprocess: dark/colored shirts get luminance-stretched before
+      // DoG runs (see preprocessForShading). Computed at most once per src,
+      // skipped entirely when both shading caches hit. White / light photos
+      // exit preprocessForShading as identity, so this is invariant for them.
+      let _shadingInput: ShadingInput | null = null;
+      const getShadingInput = () =>
+        (_shadingInput ?? (_shadingInput = preprocessForShading(image, detectedQuad)));
+
       let sh = shadingMemCache.get(src) ?? null;
       if (!sh) {
         const cachedSh = loadCachedMap(SHADING_CACHE_PREFIX, src);
@@ -767,7 +1035,7 @@ function ModelComposite({
           sh = await decodeCachedMap(cachedSh, image.naturalWidth, image.naturalHeight);
           if (cancelled) return;
         } else {
-          sh = buildShadingMap(image);
+          sh = buildShadingMap(getShadingInput());
           saveCachedMap(SHADING_CACHE_PREFIX, src, sh);
         }
         shadingMemCache.set(src, sh);
@@ -785,7 +1053,7 @@ function ModelComposite({
           wsh = await decodeCachedMap(cachedWsh, image.naturalWidth, image.naturalHeight);
           if (cancelled) return;
         } else {
-          wsh = buildShadingMap(image, 0.1);
+          wsh = buildShadingMap(getShadingInput(), 0.1);
           saveCachedMap(WIDE_SHADING_CACHE_PREFIX, src, wsh);
         }
         wideShadingMemCache.set(src, wsh);
@@ -823,19 +1091,10 @@ function ModelComposite({
       if (cancelled) return;
       fabricRef.current = fb;
 
-      setStatus('pose');
-      try {
-        const lm = await detectPoseCached(image, src);
-        if (cancelled) return;
-        if (lm) {
-          setQuad(quadFromLandmarks(lm, image.naturalWidth, image.naturalHeight));
-          setStatus('ready');
-        } else {
-          setStatus('fail');
-        }
-      } catch (e) {
-        if (cancelled) return;
-        console.warn('pose fail', e);
+      if (detectedQuad) {
+        setQuad(detectedQuad);
+        setStatus('ready');
+      } else {
         setStatus('fail');
       }
     };
@@ -943,6 +1202,14 @@ function ModelComposite({
       // untouched so step 2.5/2.6/2.7 masks still work). Iteration is bounded
       // to the print-quad bbox — ~20% of canvas pixels, smooth on drag.
       applyGarmentBlend(tmp, garment, preset, bbox);
+
+      // Step 1.5d: edge inner shadow. Darkens a soft ring inside the alpha
+      // boundary so the pattern reads as ink absorbed into cloth, not a flat
+      // sticker. White preset has alpha=0 → no-op; black/color get the full
+      // effect. The 0.5 px alpha-edge blur in step 2 still runs on top to
+      // soften the cut against the photo.
+      if (!edgeShadowBufRef.current) edgeShadowBufRef.current = document.createElement('canvas');
+      applyEdgeInnerShadow(tmp, bbox, preset.edgeShadowPx, preset.edgeShadowAlpha, edgeShadowBufRef.current);
 
       // Step 2: alpha-composite the pattern over the shirt (source-over).
       // The 0.5 px blur softens both the pattern interior (sharpness match
@@ -1125,6 +1392,8 @@ function ModelComposite({
       className={`model-item ${large ? 'model-item-large' : ''}`}
       style={itemStyle}
       onClick={onClick}
+      data-model-url={src}
+      data-model-status={status}
     >
       <canvas ref={canvasRef} className="model-canvas" />
       {status !== 'ready' && (
