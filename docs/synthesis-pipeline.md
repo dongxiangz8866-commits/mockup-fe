@@ -248,10 +248,12 @@ md5 -q before/M016_white_front.png after/M016_white_front.png  # 应 IDENTICAL
 **结果**：白衫白背景边界 confidence 模糊，掉块风险高；正常背景下边缘比 quad 切干净。  
 **结论**：边界场景不稳，纯 4 点 quad 切的退化版本反而更鲁棒。要"精准 mask"得上 SAM/SAM2，浏览器跑不动。
 
-### B. 浏览器 Depth Anything V2 Small 推位移
+### B. 浏览器 Depth Anything V2 Small 推位移（**2026-05-11 部分翻案**：见下方「位移派生管线」）
 **做法**：`@huggingface/transformers` 跑 25 MB ONNX，输出深度灰度 → wsh 梯度 → R/G displace map → resample 印花 quad。  
 **结果**：深度模型只看得到**身体宏观 3D**（胸口大致凸出），看不到布料**微观褶皱**。胸口 disp viz 是大片均匀褐色（局部梯度 ≈ 0），印花视觉无变化。  
-**结论**：深度推位移对"印花跟着褶皱弯"无效——褶皱细节根本不在 DAv2 输出范围内。要这个细节级别得上 Sapiens-Normal（1B 参数，浏览器跑不动）或后端 GPU。
+**结论**：深度推位移**对"印花跟着褶皱弯"无效**——褶皱细节根本不在 DAv2 输出范围内。
+
+**翻案点（2026-05-11）**：DAv2 的输出对**身体宏观 wrap**（不是微观褶皱）是合适的工具——只是不能用 Sobel-of-depth（凸面中心梯度=0 的同一个物理盲区），要换成「绝对深度径向 drop warp」。详见下方「位移派生管线」章节。原档案的"无效"结论只针对当时的目标（找微观褶皱）。
 
 ### C0. B1 图案边缘内阴影（127d304 实现 → 关闭）
 **做法**：`applyEdgeInnerShadow(tmp, bbox, blurPx, strength)` —— Porter-Duff 三步：
@@ -279,3 +281,124 @@ md5 -q before/M016_white_front.png after/M016_white_front.png  # 应 IDENTICAL
 2. **Replicate SDXL inpaint + IP-Adapter（路线 H）**——1–2 天，可定制，~$0.005–0.05/张
 3. **自烘 1 件四件套（PS）+ pixi.js displacement filter**（路线 C）——美工 1–2 小时/件，质量 Recraft 同档但需积累模板库
 4. **自建 ComfyUI 服务跑 Sapiens-Normal**——周级工时 + ~$300/月 GPU，能复现 Recraft 自动烘流水线，长尾需求
+
+---
+
+# 位移派生管线（`/displace`）— 2026-05-11
+
+跟「明暗对比」管线（`/`）独立的另一条路。Recraft 风格的「3D 贴合」靠这条路实现。HashRouter 切换：`/` 是双频段 shading 缩略图网格，`/displace` 是单图 + WebGL shader。
+
+## 总览
+
+输入：
+
+- `photo` — 模特照（任意，DAv2 通用）
+- `pattern` — 印花图（带 alpha）
+- `quad` — pose 检测出的印花板四边形（沿用 shading 路的 MediaPipe pose）
+- `depth` — DAv2 Base 输出的深度图（首次 ~7s WebGPU，后续从 cache）
+
+输出：单张 canvas，印花径向贴合身体凸面，自动跟随姿态。
+
+文件：
+- `app/src/displace/depthPipeline.ts` — DAv2 单例 + 推理
+- `app/src/displace/useDepthMap.ts` — 三层缓存 hook（mem → localStorage → run）
+- `app/src/displace/displaceShader.ts` — WebGL fragment shader
+- `app/src/displace/DisplaceCanvas.tsx` — r3f 包装，绑定 uniforms
+- `app/src/displace/DisplacePage.tsx` — UI + 状态编排
+
+## 核心算法：径向 drop warp
+
+**问题**：Sobel-of-depth 在身体凸面中心（如胸口正前方）梯度 ≈ 0，displace 信号为零，印花贴不上。这是失败档案 B 当时的死路。
+
+**解法**：不用梯度，**用绝对深度的径向落差**。
+
+```
+zCenter = depth(印花中心)                  // CPU 端预算，传 uniform
+zHere   = depth(当前像素)                  // shader 内 texture2D(uDisplace)
+drop    = clamp((zCenter - zHere) / zCenter, 0, 1)
+                                            // 印花中心 drop=0；身体侧面 drop>0
+puv_warped = printCenter + (puv - printCenter) * (1 + drop * uDepthWrap * uStrength)
+                                            // 径向外推 → 视觉上印花往中心压缩
+patUV = photoToPatternUV(puv_warped)
+```
+
+效果：
+
+- 印花**中心**：drop=0，原位采样，无变形
+- 印花**边缘**：drop>0，源像素往外采，pattern 视觉压缩 = cylinder wrap
+- 自动跟 pose（quad u 轴沿肩线）+ 跟身体姿态（depth 反映真实 3D）
+- 帽子 / 包 等任意凸物都能处理，因为 DAv2 是通用深度模型
+
+`uDepthWrap` 是滑杆「贴合强度」，0–10 范围，默认 5.0。
+
+## DAv2 推理路径
+
+```
+photo → HTMLImageElement
+     → RawImage (canvas readback)        // depthPipeline.ts: estimateDepth()
+     → DAv2 Base (WebGPU fp32)           // ~7s 首次，~1-2s 后续
+     → RawImage (depth grayscale ~518×518)
+     → 上采样到 photo native size (bilinear)
+     → HTMLCanvasElement (depth map)
+```
+
+WebGPU fall back 到 WASM；Apple Silicon / 现代 dGPU 上 WebGPU 推理 ~2-7s，WASM 是 10-20s。
+
+## 缓存
+
+按 `src` URL 三层：
+
+| 层 | 命中速度 | 限制 |
+|---|---|---|
+| `depthMemCache` (Map) | 同 session 即时 | 切 photo 再切回来不重算 |
+| `depth-cache:v1` (localStorage 半res JPEG) | 100-200 ms 解码 | 跨 reload 持久；~50-100 KB / 张 |
+| 重新跑 DAv2 | 7s+ | 上面两层都 miss 时 |
+
+跟 sh-cache / wsh-cache / hl-cache 同套机制（`shading/cache.ts`）。
+
+## Cloth integration（移植自 shading 路）
+
+DAv2 出深度只解决几何 wrap，不解决"贴纸感"。shader 里同时做：
+
+- **色彩融合**（`uTint`，默认 0.20）：印花 RGB 染上衫色调，per-channel gain `1 - tint·(1 - shirt_norm_channel)`
+- **黑度抬升**（`uLift`，默认 0.05）：印花纯黑抬到 byte uLift×255，避免沉到衫色阴影里
+- **0.5 px alpha 模糊**（`rasterizePattern`）：印花外轮廓软化，杀 sticker 边
+
+这三个加起来 ≈ shading 路 `applyGarmentBlend` + 0.5px composite blur。
+
+## 性能优化点（2026-05-11）
+
+发现的几个瓶颈和修法：
+
+1. **sampleGarment 拖动重跑**：原来 quad 改一次就重扫全图（~50-200 ms）。改成按 `photoSrc` 缓存（衫色跟印花位置无关）
+2. **`photoSize` 对象字面量每渲染重建** → 触发依赖它的 useMemo / useQuadDrag 失效。`useMemo([photo])` 稳定引用
+3. **`printCenterUV` / `garmentRGB` 每渲染新数组** → 子组件 useEffect 重炸。useMemo 稳定
+4. **`zCenter` shader 内每像素采**：CPU 预算一次当 `uZCenter` uniform，省一次 texture2D / fragment
+
+剩余瓶颈：DAv2 首次推理无并行（~7s 阻塞主线程）；后续可考虑 web worker 跑推理。
+
+## UI 控制
+
+| 滑杆 / 开关 | 默认 | 范围 |
+|---|---|---|
+| 强度 | 1.0 | 0–1 |
+| 幅度 | 10.0 px | 0–20 |
+| 反向位移 | 关 | bool |
+| 光照 | 0.30 | 0–1 |
+| 色彩融合 | 0.20 | 0–0.5 |
+| 黑度抬升 | 0.05 | 0–0.4 |
+| **贴合强度** | **5.0** | **0–10** |
+| 圆柱角度 | 0° | 0–90° |
+| 身体阴影 | 0 | 0–1 |
+| 位移源 | 深度 | 深度 / DoG (旧) |
+| Debug | 合成 | 合成 / 位移 / 光照 / Shading |
+
+「圆柱角度」「身体阴影」是早期纯几何 wrap 的实验滑杆，**用户拒绝过 2 次**（看到"图案横向拉伸"），默认关，留作对比。「贴合强度」=「圆柱角度」的物理替代品。
+
+## 已知限制
+
+- DAv2 Base 100 MB 首入下载 + ~7s 推理，首次体验差
+- DAv2 输出分辨率固定 ~518²，上采样到 4K photo 时身体边缘有 1-2 px 模糊
+- 非站立 / 非正面姿势深度估计可能不准（DAv2 训练集偏向站立人像）
+- 「贴合强度」5.0 在大多数胸口印花上合适，胸大 / 凸度大的可能要降到 3-4
+- shader 内 `if (uDepthWrap > 0)` 分支：所有 fragment 走同一分支，性能上等价于无分支

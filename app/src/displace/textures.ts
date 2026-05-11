@@ -10,11 +10,18 @@ export function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
+// Soft pattern alpha edge: the single biggest "sticker" cue is the hard
+// vector cut at the pattern's outline. A 0.5 px blur on the rasterized
+// pattern softens both interior sharpness AND the alpha boundary so the
+// print reads as ink absorbed at its border. Mirrors the shading pipeline's
+// step-2 ctx.filter='blur(0.5px)' (see ModelComposite render path).
 export function rasterizePattern(img: HTMLImageElement): HTMLCanvasElement {
   const c = document.createElement('canvas');
   c.width = img.naturalWidth;
   c.height = img.naturalHeight;
-  c.getContext('2d')!.drawImage(img, 0, 0);
+  const ctx = c.getContext('2d')!;
+  ctx.filter = 'blur(0.5px)';
+  ctx.drawImage(img, 0, 0);
   return c;
 }
 
