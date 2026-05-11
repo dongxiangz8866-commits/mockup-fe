@@ -24,17 +24,21 @@ export const frag = /* glsl */ `
   uniform sampler2D uShading;    // wide DoG raw — debug view only
 
   uniform float uStrength;       // 0..1 slider — scales displace offset
-  uniform float uAmpPx;          // max ±pixels at strength=1
   uniform float uDispSign;       // +1 = pattern flows into folds (default); -1 = reverse
   uniform float uDepthWrap;      // 0 = use Sobel-disp from uDisplace; >0 = treat uDisplace texture as RAW DEPTH and warp radially around uPrintCenterUV
   uniform vec2  uPrintCenterUV;  // print quad center in PHOTO uv (top-down) — only used when uDepthWrap > 0
   uniform float uZCenter;        // depth at uPrintCenterUV, pre-computed CPU-side so the fragment shader doesn't re-sample the same texel per pixel
-  uniform float uHalfAngle;      // RADIANS: half-extent of the cylinder the print subtends on the body. 0 = flat. ~0.31 (≈18°, total 36°) is a typical chest print on a torso. >1.0 starts to feel fish-eye.
-  uniform float uBodyShade;      // 0..0.4 cosine-falloff darkening toward pattern-u edges (cylinder Lambertian)
-  uniform vec3  uGarmentRGB;     // shirt color sampled from the print quad (0..1 normalized)
-  uniform float uTint;           // 0..0.5 chromatic adaptation: how much the print picks up shirt's color cast
-  uniform float uLift;           // 0..0.4 black-level lift: pattern blacks rise to byte uLift*255 (kills "ink-on-paper" cue on light shirts; on dark shirts kills "invisible blob" merging)
-  uniform float uLightStrength;  // 0..1 — how much the light multiply attenuates pattern
+  uniform vec3  uEnvRGB;         // photo-wide mean RGB (0..1), print quad masked out — env color cast estimate
+  uniform float uTint;           // 0..0.5 chromatic adaptation strength toward envWhite
+  uniform float uSceneBrightness;// 0.5..1.0 auto from garment lum — overall pattern brightness target (black-shirt scene 0.5 to dim print, white scene 1.0 native)
+  uniform float uLift;           // 0..0.3 black-level lift — pairs with sceneBrightness on dark shirts so the dimmed pattern still has a visible floor above shirt black
+  uniform float uLightStrength;  // 0..1 — how much the light multiply attenuates pattern (shadow modulation)
+
+  // DoG-Sobel displace amplitude in pixels — only consumed when uDepthWrap=0
+  // (DoG-旧 mode). The depth path scales by uDepthWrap directly. Hardcoded
+  // since the legacy DoG path is for comparison only and never needed runtime
+  // tuning.
+  const float DOG_AMP_PX = 10.0;
   uniform vec2  uPhotoSize;      // photo dimensions in pixels
   uniform vec2  uQuadTL;
   uniform vec2  uQuadTR;
@@ -86,23 +90,11 @@ export const frag = /* glsl */ `
     } else {
       // Original Sobel-of-DoG path.
       vec2 disp = (dispCol.rg - vec2(0.5)) * 2.0;     // [-1, 1]
-      vec2 offUV = disp * uAmpPx * uStrength * uDispSign / uPhotoSize;
+      vec2 offUV = disp * DOG_AMP_PX * uStrength * uDispSign / uPhotoSize;
       puvWarped = puv + offUV;
     }
 
     vec2 patUV = photoToPatternUV(puvWarped);
-
-    // True cylinder projection in pattern-u (pose-aligned: the quad u-axis is
-    // the shoulder line). Forward physics: a flat artwork wrapped onto a
-    // cylinder of half-angular-extent α projects to x = sin(u·α)/sin(α). We
-    // invert to find the source u for each output x. uHalfAngle = 0 →
-    // identity (flat sticker). Power-function approximations (pow(u, p))
-    // give "fish-eye" distortion at high values because they violate the
-    // sin/asin geometry — center over-stretches, edges over-compress.
-    float u = (patUV.x - 0.5) * 2.0;                  // [-1, 1] across the print
-    float sa = sin(max(uHalfAngle, 1e-4));
-    float srcU = asin(clamp(u * sa, -1.0, 1.0)) / max(uHalfAngle, 1e-4);
-    patUV.x = srcU * 0.5 + 0.5;
 
     vec4 patCol = texture2D(uPattern, patUV);
     // Manual bounds: ClampToEdge would otherwise smear the pattern's edge
@@ -112,32 +104,43 @@ export const frag = /* glsl */ `
       step(0.0, patUV.y) * step(patUV.y, 1.0);
     patCol.a *= inside;
 
-    // Cloth integration — this is what kills the "sticker pasted on top"
-    // look. Three transforms applied to the pattern's RGB inside its alpha:
-    //   1. Chromatic adaptation: shift pattern's color cast toward the
-    //      shirt's hue. Per-channel gain (1 - tint·(1 - shirt_norm_channel))
-    //      preserves luminance, only adds the shirt's color cast.
-    //   2. Black-level lift: remap [0..1] to [lift..1] so pattern blacks
-    //      can't sink below the shirt's local shadow (kills "vector ink"
-    //      cue on light shirts; raises pattern dark content above shirt's
-    //      near-black noise floor on dark shirts).
-    //   3. Lighting (below): photo-driven light map × body-curvature cos.
-    float gMax = max(max(uGarmentRGB.r, uGarmentRGB.g), max(uGarmentRGB.b, 0.001));
-    vec3 chrom = vec3(1.0) - uTint * (vec3(1.0) - uGarmentRGB / gMax);
-    float liftScale = 1.0 - uLift;
-    patCol.rgb = vec3(uLift) + patCol.rgb * chrom * liftScale;
+    // Environmental chromatic adaptation, sourced from the full-photo mean
+    // (uEnvRGB, with print quad masked out CPU-side). Garment-based estimate
+    // was unstable on dark / saturated shirts (skipped them entirely). Full-
+    // image mean carries the scene's actual color cast independent of shirt
+    // color. Gating: only apply when the scene shows a clear color cast
+    // (envSat > ~0.15) — neutral scenes shouldn't pull pattern colors.
+    float envMin = min(min(uEnvRGB.r, uEnvRGB.g), uEnvRGB.b);
+    float envMax = max(max(uEnvRGB.r, uEnvRGB.g), max(uEnvRGB.b, 0.001));
+    float envSat = (envMax - envMin) / envMax;
+    vec3  envWhite = uEnvRGB / envMax;                  // normalize so we keep only the color cast, not the magnitude
+    // Most natural-light photos average to a near-neutral grey (envSat
+    // 0.03–0.10). The previous 0.10→0.30 ramp gated 色彩融合 off for the
+    // vast majority of inputs. Widened to 0.03→0.12 so mildly warm/cool
+    // scenes still pick up tint; truly grey scenes (envSat<0.03) still
+    // skipped.
+    float adaptW = uTint * smoothstep(0.03, 0.12, envSat);
+    patCol.rgb = patCol.rgb * mix(vec3(1.0), envWhite, adaptW);
 
-    // Light map alone is too aggressive for dark shirts: A1 stretch + DoG
-    // can push fold bytes down to ~50, mapping to a 0.4× multiply that
-    // crushes the print's color. uLightStrength interpolates between the
-    // raw map (1.0 = full effect) and identity (0.0 = no light at all).
+    // Pattern brightness / floor model (paired auto-tune from garment lum):
+    //   • uSceneBrightness  (0.5..1.0) — overall pattern dim factor. Applied
+    //     FIRST so the lift floor below isn't multiplied away.
+    //   • uLift             (0..0.3)   — black-point lift, applied AFTER
+    //     sceneBrightness, so even on black shirts the dimmed pattern has
+    //     a visible floor above pure shirt-black instead of crushing.
+    //   • uLightStrength    (auto white=1.0/black=0.5) — shadow modulation
+    //     strength against the photo's wide-DoG light map. Unchanged.
+    // Example, pattern white (1.0) on black shirt (sceneBrightness=0.5,
+    // uLift=0.15, lightFactor=~0.7):
+    //   1.0*0.5 = 0.5  →  0.5*(1-0.15)+0.15 = 0.575  →  0.575*0.7 ≈ 0.4
+    // → mid-grey, reads as ink on black fabric, not crushed.
+    vec3 rgb = patCol.rgb * uSceneBrightness;
+    rgb = rgb * (1.0 - uLift) + vec3(uLift);
     float light = texture2D(uLight, puv).r;            // 0..1 (multiply ident=1)
     float lightFactor = mix(1.0, light, uLightStrength);
-    // Body-curvature Lambertian: cos(θ) where θ is the cylinder angle at the
-    // print's projected u position. Uses the SAME uHalfAngle as the bend so
-    // the geometric and shading cues are consistent.
-    float bodyFactor = mix(1.0, cos(u * uHalfAngle), uBodyShade);
-    vec3 printed = patCol.rgb * mix(1.0, lightFactor * bodyFactor, patCol.a);
+    // mix(1.0, x, a) keeps fractional-alpha edge softening identical to the
+    // pre-change pipeline so anti-aliased print outlines don't shift.
+    vec3 printed = rgb * mix(1.0, lightFactor, patCol.a);
 
     vec4 photoCol = texture2D(uPhoto, puv);
     vec3 composite = mix(photoCol.rgb, printed, patCol.a);
@@ -158,15 +161,13 @@ export type DisplaceUniforms = {
   uLight: { value: THREE.Texture | null };
   uShading: { value: THREE.Texture | null };
   uStrength: { value: number };
-  uAmpPx: { value: number };
   uDispSign: { value: number };
   uDepthWrap: { value: number };
   uPrintCenterUV: { value: THREE.Vector2 };
   uZCenter: { value: number };
-  uHalfAngle: { value: number };
-  uBodyShade: { value: number };
-  uGarmentRGB: { value: THREE.Vector3 };
+  uEnvRGB: { value: THREE.Vector3 };
   uTint: { value: number };
+  uSceneBrightness: { value: number };
   uLift: { value: number };
   uLightStrength: { value: number };
   uPhotoSize: { value: THREE.Vector2 };
@@ -184,17 +185,15 @@ export function makeUniforms(): DisplaceUniforms {
     uLight: { value: null },
     uShading: { value: null },
     uStrength: { value: 1.0 },
-    uAmpPx: { value: 10.0 },
     uDispSign: { value: 1.0 },
     uDepthWrap: { value: 0.0 },                       // 0 = Sobel disp; depth path enables this
     uPrintCenterUV: { value: new THREE.Vector2(0.5, 0.5) },
     uZCenter: { value: 0.5 },
-    uHalfAngle: { value: 0.0 },   // OFF by default — cylinder warp on its own reads as fish-eye
-    uBodyShade: { value: 0.0 },
-    uGarmentRGB: { value: new THREE.Vector3(0.5, 0.5, 0.5) },
-    uTint: { value: 0.20 },
-    uLift: { value: 0.05 },
-    uLightStrength: { value: 0.3 },
+    uEnvRGB: { value: new THREE.Vector3(0.5, 0.5, 0.5) },
+    uTint: { value: 0.10 },
+    uSceneBrightness: { value: 1.0 },
+    uLift: { value: 0.0 },
+    uLightStrength: { value: 1.0 },
     uPhotoSize: { value: new THREE.Vector2(1, 1) },
     uQuadTL: { value: new THREE.Vector2(0, 0) },
     uQuadTR: { value: new THREE.Vector2(1, 0) },

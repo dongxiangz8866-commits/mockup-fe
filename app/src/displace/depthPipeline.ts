@@ -22,16 +22,33 @@ async function makePipe(): Promise<unknown> {
   }
 }
 
+// Same rationale as poseDetector.getLandmarker: clear the slot on rejection
+// so a single CDN / WebGPU init flake doesn't permanently poison the cache.
 export function getDepthPipe(): Promise<unknown> {
-  if (!pipePromise) pipePromise = makePipe();
-  return pipePromise;
+  if (pipePromise) return pipePromise;
+  const p = makePipe();
+  p.catch(() => {
+    if (pipePromise === p) pipePromise = null;
+  });
+  pipePromise = p;
+  return p;
 }
 
 // Run DAv2 on the photo and return a grayscale depth canvas at PHOTO native
 // resolution (model itself runs at its preferred input size — typically 518²;
 // the result is upscaled to photo dims so subsequent Sobel runs at full res).
 export async function estimateDepth(photo: HTMLImageElement): Promise<HTMLCanvasElement> {
-  const pipe = (await getDepthPipe()) as (img: RawImage) => Promise<{ depth: RawImage }>;
+  // Pair with getDepthPipe's rejection reset: first attempt may flake on
+  // CDN / WebGPU init; second attempt re-inits from scratch and usually
+  // succeeds. Without this, transient hiccups bubble up as "all failed".
+  let pipe: (img: RawImage) => Promise<{ depth: RawImage }>;
+  try {
+    pipe = (await getDepthPipe()) as (img: RawImage) => Promise<{ depth: RawImage }>;
+  } catch (e) {
+    console.warn('[depth] first init threw, retrying once in 500ms:', e);
+    await new Promise((r) => setTimeout(r, 500));
+    pipe = (await getDepthPipe()) as (img: RawImage) => Promise<{ depth: RawImage }>;
+  }
   // Convert HTMLImageElement → RawImage via canvas readback. Avoids the URL
   // fetch path inside transformers (which trips on blob: URLs from
   // URL.createObjectURL and on cross-origin photo sources without CORS).

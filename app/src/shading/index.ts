@@ -7,6 +7,8 @@ export { sampleShirtQuadLums, preprocessForShading, buildShadingMap } from './bu
 export { buildHighlightMap } from './buildHighlightMap';
 export { buildFabricTexture } from './buildFabricTexture';
 export { sampleGarment, classifyShirt } from './sampleGarment';
+export { sampleScene } from './sampleScene';
+export type { SceneSample } from './sampleScene';
 export {
   PRESETS,
   applyGarmentBlend,

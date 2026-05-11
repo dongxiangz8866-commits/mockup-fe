@@ -22,15 +22,13 @@ type Props = {
   photoSize: { w: number; h: number };
   quad: Quad;
   strength: number;
-  ampPx: number;
   dispSign: number;
   depthWrap: number;
   zCenter: number;
   printCenterUV: [number, number];
-  halfAngle: number;
-  bodyShade: number;
-  garmentRGB: [number, number, number];
+  envRGB: [number, number, number];
   tint: number;
+  sceneBrightness: number;
   lift: number;
   lightStrength: number;
   debugMode: DebugMode;
@@ -67,16 +65,8 @@ export default function DisplaceCanvas(p: Props) {
   }, [uniforms, p.strength]);
 
   useEffect(() => {
-    uniforms.uAmpPx.value = p.ampPx;
-  }, [uniforms, p.ampPx]);
-
-  useEffect(() => {
     uniforms.uDispSign.value = p.dispSign;
   }, [uniforms, p.dispSign]);
-
-  useEffect(() => {
-    uniforms.uHalfAngle.value = p.halfAngle;
-  }, [uniforms, p.halfAngle]);
 
   useEffect(() => {
     uniforms.uDepthWrap.value = p.depthWrap;
@@ -91,16 +81,16 @@ export default function DisplaceCanvas(p: Props) {
   }, [uniforms, p.zCenter]);
 
   useEffect(() => {
-    uniforms.uBodyShade.value = p.bodyShade;
-  }, [uniforms, p.bodyShade]);
-
-  useEffect(() => {
-    uniforms.uGarmentRGB.value.set(p.garmentRGB[0], p.garmentRGB[1], p.garmentRGB[2]);
-  }, [uniforms, p.garmentRGB]);
+    uniforms.uEnvRGB.value.set(p.envRGB[0], p.envRGB[1], p.envRGB[2]);
+  }, [uniforms, p.envRGB]);
 
   useEffect(() => {
     uniforms.uTint.value = p.tint;
   }, [uniforms, p.tint]);
+
+  useEffect(() => {
+    uniforms.uSceneBrightness.value = p.sceneBrightness;
+  }, [uniforms, p.sceneBrightness]);
 
   useEffect(() => {
     uniforms.uLift.value = p.lift;
