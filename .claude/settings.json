@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "S=.claude/session-summary.md; [ -s \"$S\" ] || exit 0; LAST=$(git log -1 --format='%ct %s' -g refs/stash 2>/dev/null); NOW=$(date +%s); LAST_T=${LAST%% *}; LAST_M=${LAST#* }; if [ -n \"$LAST_T\" ] && [ $((NOW - LAST_T)) -lt 60 ] && [ \"${LAST_M#*session-end}\" != \"$LAST_M\" ]; then exit 0; fi; T=$(head -1 \"$S\"); D=$(date +%Y-%m-%d_%H:%M); git stash push -u -m \"[session-end $D] $T\" >/dev/null 2>&1 && git stash apply --quiet >/dev/null 2>&1; exit 0",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
