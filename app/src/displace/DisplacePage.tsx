@@ -24,6 +24,7 @@ import PhotoPicker from './PhotoPicker';
 import { dataCanvasToTexture, loadImage } from './textures';
 import { useDepthMap } from './useDepthMap';
 import { useDisplaceTextures } from './useDisplaceTextures';
+import { useHairMask } from './useHairMask';
 import { useQuadDrag } from './useQuadDrag';
 import s from './DisplacePage.module.css';
 import * as THREE from 'three';
@@ -49,7 +50,7 @@ export default function DisplacePage() {
   // black-shirt patterns once shadow modulation is reasonable. Slider
   // removed from UI; uniform still wired in case we re-introduce later.
   const lift = 0.0;
-  const [tint, setTint] = useState(0.20);
+  const tint = 0.5;
   const [depthWrapStrength, setDepthWrapStrength] = useState(5.0);
   const [reverseDisp, setReverseDisp] = useState(false);
   const [dispSource, setDispSource] = useState<DispSource>('depth');
@@ -146,6 +147,29 @@ export default function DisplacePage() {
     [depthTex]
   );
 
+  // Hair segmentation → per-pixel mask for foreground occlusion. Until the
+  // ML model returns, fall back to a 1×1 black canvas (= no hair anywhere)
+  // so the shader still has a valid texture bound and the chroma-distance
+  // mask carries occlusion alone. Once ready, hair texture takes priority
+  // via the AND combination in the shader.
+  const hairResult = useHairMask(photo, photoSrc);
+  const blankHairCanvas = useMemo(() => {
+    const c = document.createElement('canvas');
+    c.width = 1;
+    c.height = 1;
+    c.getContext('2d')!.fillStyle = '#000';
+    c.getContext('2d')!.fillRect(0, 0, 1, 1);
+    return c;
+  }, []);
+  const hairTex = useMemo(
+    () => dataCanvasToTexture(hairResult.hair ?? blankHairCanvas),
+    [hairResult.hair, blankHairCanvas]
+  );
+  useEffect(
+    () => () => { hairTex?.dispose(); },
+    [hairTex]
+  );
+
   const displaceTex: THREE.Texture | null =
     dispSource === 'depth' && depthTex ? depthTex : dogDisplaceTex;
   const depthWrap = dispSource === 'depth' && depthTex ? depthWrapStrength : 0.0;
@@ -197,6 +221,13 @@ export default function DisplacePage() {
       ? [sceneSample.rgb[0] / 255, sceneSample.rgb[1] / 255, sceneSample.rgb[2] / 255]
       : [0.5, 0.5, 0.5]),
     [sceneSample]
+  );
+
+  const garmentRGB: [number, number, number] = useMemo(
+    () => (garment
+      ? [garment.rgb[0] / 255, garment.rgb[1] / 255, garment.rgb[2] / 255]
+      : [0.5, 0.5, 0.5]),
+    [garment]
   );
 
   // Auto-tune lightStrength AND sceneBrightness from the OVERLAP — the shirt
@@ -257,7 +288,7 @@ export default function DisplacePage() {
   };
 
   return (
-    <main className={s.page}>
+    <main className={s.page} data-displace-status={status} data-depth-state={depthResult.state} data-hair-state={hairResult.state} data-photo-src={photoSrc ?? ''}>
       <div className={s.toolbar}>
         <PhotoPicker current={photoSrc} onPick={pickPhoto} />
         <label className={s.uploadBtn}>
@@ -309,11 +340,6 @@ export default function DisplacePage() {
             光照 <input type="range" min={0} max={2} step={0.05} value={light}
               onChange={(e) => setLightStrength(Number(e.target.value))} />
             <span>{light.toFixed(2)}</span>
-          </label>
-          <label className={s.range}>
-            色彩融合 <input type="range" min={0} max={0.5} step={0.02} value={tint}
-              onChange={(e) => setTint(Number(e.target.value))} />
-            <span>{tint.toFixed(2)}</span>
           </label>
           <label className={s.range}>
             整体亮度 <input type="range" min={0.3} max={1.2} step={0.05} value={sceneBrightness}
@@ -370,6 +396,8 @@ export default function DisplacePage() {
               zCenter={zCenter}
               printCenterUV={printCenterUV}
               envRGB={envRGB}
+              garmentRGB={garmentRGB}
+              hairTex={hairTex}
               tint={tint}
               sceneBrightness={sceneBrightness}
               lift={lift}

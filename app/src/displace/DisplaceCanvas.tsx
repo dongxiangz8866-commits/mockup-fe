@@ -27,6 +27,8 @@ type Props = {
   zCenter: number;
   printCenterUV: [number, number];
   envRGB: [number, number, number];
+  garmentRGB: [number, number, number];
+  hairTex: THREE.Texture;
   tint: number;
   sceneBrightness: number;
   lift: number;
@@ -46,7 +48,8 @@ export default function DisplaceCanvas(p: Props) {
     uniforms.uDisplace.value = p.displaceTex;
     uniforms.uLight.value = p.lightTex;
     uniforms.uShading.value = p.shadingTex;
-  }, [uniforms, p.photoTex, p.patternTex, p.displaceTex, p.lightTex, p.shadingTex]);
+    uniforms.uHairMask.value = p.hairTex;
+  }, [uniforms, p.photoTex, p.patternTex, p.displaceTex, p.lightTex, p.shadingTex, p.hairTex]);
 
   useEffect(() => {
     uniforms.uPhotoSize.value.set(p.photoSize.w, p.photoSize.h);
@@ -83,6 +86,10 @@ export default function DisplaceCanvas(p: Props) {
   useEffect(() => {
     uniforms.uEnvRGB.value.set(p.envRGB[0], p.envRGB[1], p.envRGB[2]);
   }, [uniforms, p.envRGB]);
+
+  useEffect(() => {
+    uniforms.uGarmentRGB.value.set(p.garmentRGB[0], p.garmentRGB[1], p.garmentRGB[2]);
+  }, [uniforms, p.garmentRGB]);
 
   useEffect(() => {
     uniforms.uTint.value = p.tint;

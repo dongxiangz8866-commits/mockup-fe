@@ -33,6 +33,7 @@ export default function PhotoPicker({ current, onPick }: Props) {
           <button
             key={url}
             type="button"
+            data-photo-src={url}
             className={`${s.thumb}${url === current ? ' ' + s.thumbActive : ''}`}
             onClick={() => onPick(url)}
             title={url.split('/').pop() ?? ''}

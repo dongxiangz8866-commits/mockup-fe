@@ -22,6 +22,7 @@ export const frag = /* glsl */ `
   uniform sampler2D uDisplace;
   uniform sampler2D uLight;
   uniform sampler2D uShading;    // wide DoG raw — debug view only
+  uniform sampler2D uHairMask;   // ML hair segmentation, R=1 hair, R=0 not hair (1×1 black canvas before model loads)
 
   uniform float uStrength;       // 0..1 slider — scales displace offset
   uniform float uDispSign;       // +1 = pattern flows into folds (default); -1 = reverse
@@ -29,6 +30,9 @@ export const frag = /* glsl */ `
   uniform vec2  uPrintCenterUV;  // print quad center in PHOTO uv (top-down) — only used when uDepthWrap > 0
   uniform float uZCenter;        // depth at uPrintCenterUV, pre-computed CPU-side so the fragment shader doesn't re-sample the same texel per pixel
   uniform vec3  uEnvRGB;         // photo-wide mean RGB (0..1), print quad masked out — env color cast estimate
+  uniform vec3  uGarmentRGB;     // garment mean RGB (0..1) sampled from print quad top/bottom strips — used as a foreground-occlusion key (pixels far from this color are treated as hair / hands / etc. and keep the photo color instead of the print)
+  uniform float uOcclusionStart; // color-distance where occlusion mask starts to fall (0 = match shirt, 1.732 = max distance). Smaller = aggressive (more pixels treated as foreground).
+  uniform float uOcclusionEnd;   // color-distance where occlusion mask is fully 0 (pixel is definitely foreground)
   uniform float uTint;           // 0..0.5 chromatic adaptation strength toward envWhite
   uniform float uSceneBrightness;// 0.5..1.0 auto from garment lum — overall pattern brightness target (black-shirt scene 0.5 to dim print, white scene 1.0 native)
   uniform float uLift;           // 0..0.3 black-level lift — pairs with sceneBrightness on dark shirts so the dimmed pattern still has a visible floor above shirt black
@@ -140,10 +144,74 @@ export const frag = /* glsl */ `
     float lightFactor = mix(1.0, light, uLightStrength);
     // mix(1.0, x, a) keeps fractional-alpha edge softening identical to the
     // pre-change pipeline so anti-aliased print outlines don't shift.
-    vec3 printed = rgb * mix(1.0, lightFactor, patCol.a);
+    // (Final composition with patCol.a happens further below, after we know
+    // occlMask so we can also soften lightFactor near foreground edges.)
 
     vec4 photoCol = texture2D(uPhoto, puv);
-    vec3 composite = mix(photoCol.rgb, printed, patCol.a);
+
+    // FOREGROUND OCCLUSION MASK. Pattern alpha gates color replacement, but
+    // it doesn't know that some "inside the print quad" pixels aren't actually
+    // shirt — strands of hair, a hand resting on the chest, a necklace pendant
+    // sit in FRONT of the garment and should occlude the print. Without this
+    // mask, the print paints flatly on top of those foreground objects (looks
+    // like a sticker plastered over hair).
+    //
+    // Distance is computed in CHROMATICITY (RGB / max channel) rather than raw
+    // RGB. Raw-RGB distance falsely flagged the SHIRT'S OWN SHADOWS as
+    // foreground (a fold dropping a white shirt's R/G/B from 0.95 to 0.65 is a
+    // big RGB distance from the mean but is still "the same shirt color"). In
+    // chromaticity, a neutral-grey shadow stays at (1,1,1), so only hue shifts
+    // (hair, skin, jewelry, a colored print already painted on the shirt) move
+    // the distance and trigger occlusion.
+    //
+    // Trade-off: shirts with a colored logo / floral print on them will still
+    // get the print masked out where the existing graphic sits — acceptable for
+    // single-color shirt use case.
+    float gMax = max(max(uGarmentRGB.r, uGarmentRGB.g), max(uGarmentRGB.b, 1.0/255.0));
+    vec3 gChroma = uGarmentRGB / gMax;
+
+    // Chroma-based mask (catches skin / jewelry / generally any non-shirt-
+    // color foreground). Single-sample now — the 3×3 box blur this used to
+    // do was only needed back when chroma was the only signal for hair, and
+    // the ML hair mask below replaces that role precisely.
+    float pMax = max(max(photoCol.r, photoCol.g), max(photoCol.b, 1.0/255.0));
+    vec3 pChroma = photoCol.rgb / pMax;
+    float colDist = distance(pChroma, gChroma);
+    float chromaMask = 1.0 - smoothstep(uOcclusionStart, uOcclusionEnd, colDist);
+
+    // ML hair mask. Bilinear upscale from 256² model output gives a soft
+    // 1-2 px edge that reads cleanly as "print fades into hair" rather than
+    // the dithered look of the previous chroma-only heuristic. Combined with
+    // chromaMask by multiplication so BOTH "non-shirt color" AND "hair"
+    // remove the print; either alone is enough to occlude.
+    //
+    // DILATE the hair mask via a small max-filter on a cross-shaped kernel.
+    // Segmenter labels the dense hair body well but cuts a few px short on
+    // the wispy end of strands → print bled onto those strand tips. Taking
+    // the max over a few neighbor texels extends the mask a few photo px
+    // outward, eating up the un-segmented strand tail with negligible cost
+    // (5 cheap texture2D() per fragment).
+    vec2 hairTexel = 1.0 / uPhotoSize * 2.0;
+    float hairProb = texture2D(uHairMask, puv).r;
+    hairProb = max(hairProb, texture2D(uHairMask, puv + vec2( hairTexel.x, 0.0)).r);
+    hairProb = max(hairProb, texture2D(uHairMask, puv + vec2(-hairTexel.x, 0.0)).r);
+    hairProb = max(hairProb, texture2D(uHairMask, puv + vec2(0.0,  hairTexel.y)).r);
+    hairProb = max(hairProb, texture2D(uHairMask, puv + vec2(0.0, -hairTexel.y)).r);
+    float occlMask = chromaMask * (1.0 - hairProb);
+
+    // Soften shadow modulation in the occlusion soft-edge band. When hair
+    // casts a shadow ONTO the shirt, the photo darkens but chroma stays
+    // near shirt color → occlMask is slightly < 1 → the shadow there is
+    // cast-shadow, not cloth-fold. Letting the wide-DoG light map crush
+    // the print in that region produced a black blob where the cat face
+    // overlapped the hair-cast shadow. By gating lightFactor with occlMask,
+    // edge regions get progressively less shadow modulation: print near a
+    // foreground occluder stays in its natural brightness instead of
+    // borrowing the photo's hair-shadow darkness.
+    float effLightFactor = mix(1.0, lightFactor, occlMask);
+    vec3 printed = rgb * mix(1.0, effLightFactor, patCol.a);
+
+    vec3 composite = mix(photoCol.rgb, printed, patCol.a * occlMask);
 
     vec3 outRGB = composite;
     if (uDebugMode == 1) outRGB = vec3(dispCol.rg, 0.5);
@@ -160,12 +228,16 @@ export type DisplaceUniforms = {
   uDisplace: { value: THREE.Texture | null };
   uLight: { value: THREE.Texture | null };
   uShading: { value: THREE.Texture | null };
+  uHairMask: { value: THREE.Texture | null };
   uStrength: { value: number };
   uDispSign: { value: number };
   uDepthWrap: { value: number };
   uPrintCenterUV: { value: THREE.Vector2 };
   uZCenter: { value: number };
   uEnvRGB: { value: THREE.Vector3 };
+  uGarmentRGB: { value: THREE.Vector3 };
+  uOcclusionStart: { value: number };
+  uOcclusionEnd: { value: number };
   uTint: { value: number };
   uSceneBrightness: { value: number };
   uLift: { value: number };
@@ -184,12 +256,16 @@ export function makeUniforms(): DisplaceUniforms {
     uDisplace: { value: null },
     uLight: { value: null },
     uShading: { value: null },
+    uHairMask: { value: null },
     uStrength: { value: 1.0 },
     uDispSign: { value: 1.0 },
     uDepthWrap: { value: 0.0 },                       // 0 = Sobel disp; depth path enables this
     uPrintCenterUV: { value: new THREE.Vector2(0.5, 0.5) },
     uZCenter: { value: 0.5 },
     uEnvRGB: { value: new THREE.Vector3(0.5, 0.5, 0.5) },
+    uGarmentRGB: { value: new THREE.Vector3(0.5, 0.5, 0.5) },
+    uOcclusionStart: { value: 0.15 },
+    uOcclusionEnd: { value: 0.45 },
     uTint: { value: 0.10 },
     uSceneBrightness: { value: 1.0 },
     uLift: { value: 0.0 },
