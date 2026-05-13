@@ -20,6 +20,11 @@ export const frag = /* glsl */ `
   uniform sampler2D uPhoto;
   uniform sampler2D uPattern;
   uniform sampler2D uDisplace;
+  // Re-purposed 2026-05-13: previously held a photo-DoG Sobel byte map (which
+  // the wrinkle term consumed before 3c180bb removed it). Now bound to the
+  // FINE-blur DAv2 depth canvas (≈ 8 px native blur on 518²), which preserves
+  // clothing-fold gradients the macro depth (uDisplace) wipes out by design.
+  // Read as raw depth in .r and Sobel-differentiated inside this shader.
   uniform sampler2D uWrinkleDisplace;
   uniform sampler2D uLight;
   uniform sampler2D uShading;    // wide DoG raw — debug view only
@@ -28,7 +33,7 @@ export const frag = /* glsl */ `
   uniform float uStrength;       // 0..1 slider — scales displace offset
   uniform float uDispSign;       // +1 = pattern flows into folds (default); -1 = reverse
   uniform float uDepthWrap;      // 0 = use Sobel-disp from uDisplace; >0 = treat uDisplace texture as RAW DEPTH and warp radially around uPrintCenterUV
-  uniform float uWrinkleStrength;// scales fine cloth wrinkle displacement on top of macro depth wrap
+  uniform float uWrinkleStrength;// scales the in-shader Sobel-of-fine-depth fold term on top of the macro radial wrap. 0 = off (also gated CPU-side when no fine depth is bound).
   uniform vec2  uPrintCenterUV;  // print quad center in PHOTO uv (top-down) — only used when uDepthWrap > 0
   uniform float uZCenter;        // depth at uPrintCenterUV, pre-computed CPU-side so the fragment shader doesn't re-sample the same texel per pixel
   uniform float uZRange;         // robust local depth contrast inside print quad; normalizes weak DAv2 depth maps before applying the slider
@@ -54,6 +59,39 @@ export const frag = /* glsl */ `
 
   const float DEPTH_WRAP_GAIN = 0.10;
   const float WRINKLE_AMP_PX = 16.0;
+
+  // Local fold compression — coherent radial push modulated by shading
+  // depression. Three iterations of per-pixel ∇shading-direction warp
+  // (2026-05-13) all reproduced the same failure the original memory
+  // predicted for photo-DoG sources: per-pixel direction estimates on
+  // wide-DoG flip sign across fabric-weave / sub-fold noise → pattern is
+  // cut into wave-like fragments, not smooth drape.
+  //
+  // Coherent alternative: the DIRECTION of the local push is always radial
+  // outward from print center — identical to the macro depth-wrap
+  // direction, smooth by construction. Only the MAGNITUDE varies — bigger
+  // where shading is locally dark (folds), zero on flat cloth. Adjacent
+  // fold pixels see similar magnitude AND similar direction, so the
+  // displacement field has no high-frequency sign flips and the pattern
+  // can't fragment.
+  //
+  // Trade-off: gives up "letters trace the fold contour" in exchange for
+  // coherent compression at folds. Visual: pattern compresses radially
+  // toward print center wherever local shading goes dark, expands at
+  // bright crests. Same compression logic the macro wrap uses at body
+  // silhouettes, just driven by local shading depression as a scalar
+  // magnitude instead of by depth drop.
+  //
+  // SHADING_DROP_AMP_PX: max radial push in screen px at slider=1, fold
+  //   fully saturated. Slider 3 + saturated fold → 45 px push.
+  // SHADING_DROP_NOISE/FLOOR: smoothstep noise gate. Below NOISE: no
+  //   push. Above FLOOR: full strength. White-shirt fold depressions land
+  //   ~0.10-0.25, dark-shirt ~0.30-0.70 → FLOOR=0.20 saturates both at
+  //   full strength once they're real folds, giving identical UV bend
+  //   regardless of garment color.
+  const float SHADING_DROP_AMP_PX = 15.0;
+  const float SHADING_DROP_NOISE = 0.05;
+  const float SHADING_DROP_FLOOR = 0.20;
 
   // Affine inverse using TL / TR / BL — three points are enough to invert a
   // parallelogram, which is what the existing ModelGrid pipeline uses for the
@@ -105,6 +143,67 @@ export const frag = /* glsl */ `
       float drop = clamp((uZCenter - zHere) / max(uZCenter, 0.01), 0.0, 1.0);
       vec2 fromCenter = puv - uPrintCenterUV;
       puvWarped = uPrintCenterUV + fromCenter * (1.0 + drop * uDepthWrap * uStrength * uDispSign);
+
+      // LOCAL FOLD COMPLIANCE — Sobel-of-photo-shading.
+      //
+      // The radial wrap above captures the smooth body cylinder (chest dome)
+      // but is symmetric around uPrintCenterUV, so any local depth structure
+      // smaller than the print quad — a cowl drape, a vertical crease through
+      // the V-neck, the chest gather under a tank top — produces ZERO bend.
+      //
+      // Magnitude scalar from uShading: how deep into a fold this pixel is.
+      // Shading bytes 0..128 with 128 = no fold; depression = (128 - byte)
+      // mapped to 0..1.
+      //
+      // 9-tap box-blur at 30-px tap spacing (60-px footprint) — single
+      // samples on tie-dyed / printed / weave-patterned garments fire on
+      // every dark dye band, not just folds. Result: high-freq variation
+      // of foldStrength in Y → adjacent rows of the print get different
+      // radial push amounts → horizontal slash artefacts through letters
+      // (user reproduced 2026-05-13 on beige tie-dye top). Real fabric
+      // folds extend 100+ px so survive the blur; dye marbling (~20-50
+      // px) averages out.
+      vec2 sbTx = 30.0 / uPhotoSize;
+      float sHere =
+        ( texture2D(uShading, puv + vec2(-sbTx.x, -sbTx.y)).r
+        + texture2D(uShading, puv + vec2(0.0,     -sbTx.y)).r
+        + texture2D(uShading, puv + vec2( sbTx.x, -sbTx.y)).r
+        + texture2D(uShading, puv + vec2(-sbTx.x,  0.0)).r
+        + texture2D(uShading, puv).r
+        + texture2D(uShading, puv + vec2( sbTx.x,  0.0)).r
+        + texture2D(uShading, puv + vec2(-sbTx.x,  sbTx.y)).r
+        + texture2D(uShading, puv + vec2(0.0,      sbTx.y)).r
+        + texture2D(uShading, puv + vec2( sbTx.x,  sbTx.y)).r
+        ) / 9.0;
+      float shadingDrop = clamp((0.5 - sHere) * 2.0, 0.0, 1.0);
+
+      // CLOTH-ONLY GATE — uShading dims at any non-cloth edge too (skin at
+      // V-neck, hair shadow, jewelry, background curtain falloff). Mask by
+      // chromaticity match to garment color so only cloth pixels register
+      // as "fold". Chromaticity (rgb / max channel) rather than raw RGB so
+      // shadowed cloth (lower brightness, same hue) stays counted as cloth.
+      vec4 fpHere = texture2D(uPhoto, puv);
+      float fpMax = max(max(fpHere.r, fpHere.g), max(fpHere.b, 1.0/255.0));
+      vec3 fpChroma = fpHere.rgb / fpMax;
+      float gMaxC = max(max(uGarmentRGB.r, uGarmentRGB.g), max(uGarmentRGB.b, 1.0/255.0));
+      vec3 gChromaC = uGarmentRGB / gMaxC;
+      float clothMaskFold = 1.0 - smoothstep(0.20, 0.55, distance(fpChroma, gChromaC));
+      shadingDrop *= clothMaskFold;
+
+      // Soft-threshold suppresses flat-cloth noise (depressions < 0.05) and
+      // saturates real fold magnitudes (≥ 0.20) to 1.0 — same per-slider
+      // amplitude regardless of garment color.
+      float foldStrength = smoothstep(SHADING_DROP_NOISE, SHADING_DROP_FLOOR, shadingDrop);
+
+      // Coherent radial push outward from print center. fromCenter was
+      // already computed above for the depth wrap; reuse direction here.
+      // Normalize is guarded so the print-center pixel itself doesn't
+      // explode — there's no defined outward direction at fromCenter=0,
+      // but foldStrength is also tiny there (typically off any fold) so
+      // the contribution is moot.
+      float fcLen = length(fromCenter);
+      vec2 radialDir = fcLen > 1e-4 ? fromCenter / fcLen : vec2(0.0);
+      puvWarped += radialDir * foldStrength * SHADING_DROP_AMP_PX * uWrinkleStrength * uStrength * uDispSign / uPhotoSize;
     } else {
       // Original Sobel-of-DoG path.
       vec2 disp = (dispCol.rg - vec2(0.5)) * 2.0;     // [-1, 1]
@@ -241,6 +340,34 @@ export const frag = /* glsl */ `
     if (uDebugMode == 1) outRGB = vec3(dispCol.rg, 0.5);
     else if (uDebugMode == 2) outRGB = vec3(light);
     else if (uDebugMode == 3) outRGB = vec3(texture2D(uShading, puv).r);
+    else if (uDebugMode == 4) outRGB = vec3(texture2D(uWrinkleDisplace, puv).r);
+    else if (uDebugMode == 5) {
+      // Visualize the fold-strength scalar driving the radial push — same
+      // value used inside the depth branch: 9-tap-blurred shading
+      // depression × cloth mask, then smoothstep-thresholded.
+      vec2 sbTx2 = 30.0 / uPhotoSize;
+      float sDbg =
+        ( texture2D(uShading, puv + vec2(-sbTx2.x, -sbTx2.y)).r
+        + texture2D(uShading, puv + vec2(0.0,      -sbTx2.y)).r
+        + texture2D(uShading, puv + vec2( sbTx2.x, -sbTx2.y)).r
+        + texture2D(uShading, puv + vec2(-sbTx2.x,  0.0)).r
+        + texture2D(uShading, puv).r
+        + texture2D(uShading, puv + vec2( sbTx2.x,  0.0)).r
+        + texture2D(uShading, puv + vec2(-sbTx2.x,  sbTx2.y)).r
+        + texture2D(uShading, puv + vec2(0.0,       sbTx2.y)).r
+        + texture2D(uShading, puv + vec2( sbTx2.x,  sbTx2.y)).r
+        ) / 9.0;
+      float depressionDbg = clamp((0.5 - sDbg) * 2.0, 0.0, 1.0);
+      vec4 fpDbg = texture2D(uPhoto, puv);
+      float fpMaxDbg = max(max(fpDbg.r, fpDbg.g), max(fpDbg.b, 1.0/255.0));
+      vec3 fpChromaDbg = fpDbg.rgb / fpMaxDbg;
+      float gMaxDbg = max(max(uGarmentRGB.r, uGarmentRGB.g), max(uGarmentRGB.b, 1.0/255.0));
+      vec3 gChromaDbg = uGarmentRGB / gMaxDbg;
+      float clothMaskDbg = 1.0 - smoothstep(0.20, 0.55, distance(fpChromaDbg, gChromaDbg));
+      depressionDbg *= clothMaskDbg;
+      float strengthDbg = smoothstep(SHADING_DROP_NOISE, SHADING_DROP_FLOOR, depressionDbg);
+      outRGB = vec3(strengthDbg);
+    }
 
     gl_FragColor = vec4(outRGB, 1.0);
   }

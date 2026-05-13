@@ -34,10 +34,22 @@ export function getDepthPipe(): Promise<unknown> {
   return p;
 }
 
-// Run DAv2 on the photo and return a grayscale depth canvas at PHOTO native
-// resolution (model itself runs at its preferred input size — typically 518²;
-// the result is upscaled to photo dims so subsequent Sobel runs at full res).
-export async function estimateDepth(photo: HTMLImageElement): Promise<HTMLCanvasElement> {
+export type DepthMaps = {
+  /** Macro depth — heavy blur, drives the radial body-cylinder wrap. Local
+   *  fold detail is wiped on purpose so the radial drop reads only the
+   *  smooth front-to-side curvature. */
+  depth: HTMLCanvasElement;
+  /** Fine depth — light blur, preserves clothing-fold gradients. Consumed
+   *  by the in-shader Sobel-of-depth term so vertical drape / cowl creases
+   *  bend the pattern locally. Same source inference as `depth`; just a
+   *  different blur of the same raw DAv2 output. */
+  depthFine: HTMLCanvasElement;
+};
+
+// Run DAv2 on the photo and return TWO grayscale depth canvases at PHOTO
+// native resolution — see DepthMaps. The model itself runs at its preferred
+// input size (~518²); both outputs are upscaled to photo dims.
+export async function estimateDepth(photo: HTMLImageElement): Promise<DepthMaps> {
   // Pair with getDepthPipe's rejection reset: first attempt may flake on
   // CDN / WebGPU init; second attempt re-inits from scratch and usually
   // succeeds. Without this, transient hiccups bubble up as "all failed".
@@ -84,30 +96,56 @@ export async function estimateDepth(photo: HTMLImageElement): Promise<HTMLCanvas
 
   // Two-step: blur at the DAv2 native resolution first (small canvas, cheap
   // kernel, predictable Skia behavior for large blur radii), THEN upscale to
-  // photo size. The displace shader's radial wrap reads
-  //   drop = (zCenter - zHere) / zCenter
-  // per fragment and multiplies it into the warp offset, so any local depth
-  // variation (clothing folds, hair shadows, the print already on the shirt,
-  // jewelry) bends adjacent pixels of the pattern by different amounts and
-  // turns straight horizontal lines into waves. We want only the smooth
-  // front-to-side body-cylinder slope to survive — everything else has to
-  // go. A native-resolution kernel of w0/12 ≈ 43 px on a 518² depth = a
-  // 12-pixel feature wipe, well above the scale of clothing noise.
+  // photo size. We emit TWO blur levels off the same source:
+  //   • MACRO (w0/12 ≈ 43 px on 518²) — for the radial wrap. Wipes folds,
+  //     hair shadows, print-on-shirt edges, jewelry by design; only the
+  //     smooth front-to-side body-cylinder slope survives. Pre-2026-05-13
+  //     this was the only output, and its design comment is preserved:
+  //     local depth variation bends adjacent pattern pixels by different
+  //     amounts, which turns straight pattern lines into waves under the
+  //     radial-wrap formula — bad if you only have radial wrap.
+  //   • FINE (w0/96 ≈ 5 px on 518²) — for the in-shader depth-gradient term
+  //     (∇z added to the warp offset). Here we WANT folds to bend pattern,
+  //     because the gradient term is what produces local drape compliance.
+  //     The 5 px kernel still smooths DAv2 per-pixel noise but preserves
+  //     fold-scale features (~20-100 px in photo space). Pre-2026-05-13 we
+  //     used w0/64 ≈ 8 px and the shader's 4-px central-diff sampler ended
+  //     up reading gradient from INSIDE the blur peak — fold response was
+  //     near-zero. The shader now central-diffs at FOLD_TAP=12 px, which
+  //     pairs with a tighter native blur to give a real fold response.
+  const macroBlurPx = Math.max(8, Math.round(w0 / 12));
+  const fineBlurPx = Math.max(2, Math.round(w0 / 96));
+
+  const macroOut = blurAndUpscale(tmp, macroBlurPx, photo.naturalWidth, photo.naturalHeight);
+  const fineOut = blurAndUpscale(tmp, fineBlurPx, photo.naturalWidth, photo.naturalHeight);
+  console.log(
+    '[depth] blurred at native', w0, 'x', h0,
+    'with macro=' + macroBlurPx + 'px, fine=' + fineBlurPx + 'px',
+    '→ upscaling to', photo.naturalWidth, 'x', photo.naturalHeight
+  );
+
+  return { depth: macroOut, depthFine: fineOut };
+}
+
+function blurAndUpscale(
+  src: HTMLCanvasElement,
+  blurPx: number,
+  outW: number,
+  outH: number
+): HTMLCanvasElement {
   const blurred = document.createElement('canvas');
-  blurred.width = w0;
-  blurred.height = h0;
+  blurred.width = src.width;
+  blurred.height = src.height;
   const bctx = blurred.getContext('2d')!;
-  const blurPxNative = Math.max(8, Math.round(w0 / 12));
-  bctx.filter = `blur(${blurPxNative}px)`;
-  bctx.drawImage(tmp, 0, 0);
-  console.log('[depth] blurred at native', w0, 'x', h0, 'with', blurPxNative, 'px → upscaling to', photo.naturalWidth, 'x', photo.naturalHeight);
+  bctx.filter = `blur(${blurPx}px)`;
+  bctx.drawImage(src, 0, 0);
 
   const out = document.createElement('canvas');
-  out.width = photo.naturalWidth;
-  out.height = photo.naturalHeight;
+  out.width = outW;
+  out.height = outH;
   const octx = out.getContext('2d')!;
   octx.imageSmoothingEnabled = true;
   octx.imageSmoothingQuality = 'high';
-  octx.drawImage(blurred, 0, 0, out.width, out.height);
+  octx.drawImage(blurred, 0, 0, outW, outH);
   return out;
 }

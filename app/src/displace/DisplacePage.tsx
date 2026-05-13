@@ -55,7 +55,13 @@ export default function DisplacePage() {
   const strength = 1.0;
   const [depthWrapStrength, setDepthWrapStrength] = useState(5.0);
   const [debug, setDebugMode] = useState<DebugMode>('composite');
-  const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(1.0);
+  // Default 0 — the photo-shading-driven local fold push (uWrinkleStrength)
+  // has fundamental limits documented in memory: any non-zero value risks
+  // dye/weave/printed-pattern artefacts on patterned shirts. The clean,
+  // reliable baseline is macro depth wrap + light multiply alone. Users
+  // who want to experiment with local fold conformity on plain shirts can
+  // dial up; on patterned shirts (tie-dye, marble, weave-prints) leave at 0.
+  const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(0);
 
   // Photo + pose + maps pipeline.
   useEffect(() => {
@@ -132,20 +138,33 @@ export default function DisplacePage() {
   );
   const aspect = photoSize ? photoSize.w / photoSize.h : 0.667;
 
-  // Depth path — bypasses Sobel entirely (Sobel of depth at chest center is
-  // ~0, same problem as photo-DoG). The shader instead receives the RAW DEPTH
-  // texture and the print-center UV; it computes a radial outward warp where
-  // displacement = drop_from_center × distance_from_center. This produces
-  // visible cylinder wrap even at the chest's flat front, where the gradient
-  // approach gives nothing.
+  // Depth path — bypasses photo-DoG Sobel entirely. The shader instead
+  // receives:
+  //   • MACRO depth (heavily blurred) on uDisplace — drives the radial
+  //     cylinder wrap: displacement = drop_from_center × distance_from_center.
+  //     Visible body-cylinder wrap even at the chest's flat front, where a
+  //     pure ∇z approach gives nothing.
+  //   • FINE depth (lightly blurred) on uWrinkleDisplace — drives the
+  //     in-shader Sobel-of-depth term that bends pattern across local
+  //     clothing folds (drape, cowl, vertical creases through the print).
+  //     This is the "depth-driven 才算贴合" piece: macro alone reads as a
+  //     smooth ball, fine adds the actual fabric topology.
   const depthResult = useDepthMap(photo, photoSrc);
   const depthTex = useMemo(
     () => (depthResult.depth ? dataCanvasToTexture(depthResult.depth) : null),
     [depthResult.depth]
   );
+  const depthFineTex = useMemo(
+    () => (depthResult.depthFine ? dataCanvasToTexture(depthResult.depthFine) : null),
+    [depthResult.depthFine]
+  );
   useEffect(
     () => () => { depthTex?.dispose(); },
     [depthTex]
+  );
+  useEffect(
+    () => () => { depthFineTex?.dispose(); },
+    [depthFineTex]
   );
 
   // Hair segmentation → per-pixel mask for foreground occlusion. Until the
@@ -171,11 +190,13 @@ export default function DisplacePage() {
     [hairTex]
   );
 
-  // Depth handles broad torso curvature. The DoG/Sobel displacement map stays
-  // wired as a separate wrinkle-depth detail layer so fine cloth folds still
-  // bend the pattern when the ML depth path is active.
+  // Depth handles broad torso curvature on the macro tex; FINE depth feeds
+  // the per-fragment ∇z fold term in the shader. When ML depth is unavailable
+  // we fall back to the photo-DoG Sobel map on the macro slot (legacy path,
+  // uDepthWrap=0 there) — fine slot stays null and the shader gracefully
+  // skips the gradient term because uWrinkleStrength gates it.
   const displaceTex: THREE.Texture | null = depthTex ?? dogDisplaceTex;
-  const wrinkleDisplaceTex = dogDisplaceTex;
+  const wrinkleDisplaceTex: THREE.Texture | null = depthFineTex ?? dogDisplaceTex;
   const depthWrap = depthTex ? depthWrapStrength : 0.0;
 
   // User-controlled pattern size: scale the pose-detected quad around its
@@ -352,14 +373,24 @@ export default function DisplacePage() {
           <label className={s.range}>
             褶皱深度 <input type="range" min={0} max={3} step={0.05} value={wrinkleDepthStrength}
               onChange={(e) => setWrinkleDepthStrength(Number(e.target.value))}
-              disabled={!wrinkleDisplaceTex} />
+              disabled={!shadingTex} />
             <span>{wrinkleDepthStrength.toFixed(2)}</span>
           </label>
           <div className={s.debugRadios}>
-            {(['composite', 'displace', 'light', 'shading'] as DebugMode[]).map((m) => (
+            {(['composite', 'displace', 'light', 'shading', 'fine', 'foldGrad'] as DebugMode[]).map((m) => (
               <label key={m}>
                 <input type="radio" name="debug-mode" checked={debug === m} onChange={() => setDebugMode(m)} />
-                {m === 'composite' ? '合成' : m === 'displace' ? '位移' : m === 'light' ? '光照' : 'Shading'}
+                {m === 'composite'
+                  ? '合成'
+                  : m === 'displace'
+                    ? '位移'
+                    : m === 'light'
+                      ? '光照'
+                      : m === 'shading'
+                        ? 'Shading'
+                        : m === 'fine'
+                          ? 'Fine'
+                          : '褶皱强度'}
               </label>
             ))}
           </div>
@@ -398,7 +429,7 @@ export default function DisplacePage() {
               strength={strength}
               dispSign={1}
               depthWrap={depthWrap}
-              wrinkleStrength={wrinkleDepthStrength}
+              wrinkleStrength={shadingTex ? wrinkleDepthStrength : 0}
               zCenter={depthStats.center}
               zRange={depthStats.range}
               printCenterUV={printCenterUV}

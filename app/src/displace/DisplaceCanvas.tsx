@@ -4,13 +4,15 @@ import * as THREE from 'three';
 import type { Quad } from '../shading';
 import { frag, makeUniforms, vert, type DisplaceUniforms } from './displaceShader';
 
-export type DebugMode = 'composite' | 'displace' | 'light' | 'shading';
+export type DebugMode = 'composite' | 'displace' | 'light' | 'shading' | 'fine' | 'foldGrad';
 
 const debugModeIndex: Record<DebugMode, number> = {
   composite: 0,
   displace: 1,
   light: 2,
   shading: 3,
+  fine: 4,
+  foldGrad: 5,
 };
 
 type Props = {
