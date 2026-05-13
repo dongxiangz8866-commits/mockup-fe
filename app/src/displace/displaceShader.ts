@@ -223,7 +223,12 @@ export const frag = /* glsl */ `
     hairProb = max(hairProb, texture2D(uHairMask, puv + vec2(-hairTexel.x, 0.0)).r);
     hairProb = max(hairProb, texture2D(uHairMask, puv + vec2(0.0,  hairTexel.y)).r);
     hairProb = max(hairProb, texture2D(uHairMask, puv + vec2(0.0, -hairTexel.y)).r);
-    float occlMask = chromaMask * (1.0 - hairProb);
+    // chroma 通道关停：chromaticity 距离对褶皱阴影里的环境光偏色（蓝/暖）
+    // 不够鲁棒，会把褶皱深处误判为前景，让印图局部"漏底"。A/B 测试
+    // (ab-no-chroma 分支) 确认：只留 ML hair mask 即可保留头发/手前景遮挡，
+    // 同时褶皱观感回到 914676e 的水平。chromaMask 计算保留为 dead path，
+    // uOcclusionStart/End uniforms 也保留以便未来再启用。
+    float occlMask = (1.0 - hairProb);
 
     // Soften shadow modulation in the occlusion soft-edge band. When hair
     // casts a shadow ONTO the shirt, the photo darkens but chroma stays
