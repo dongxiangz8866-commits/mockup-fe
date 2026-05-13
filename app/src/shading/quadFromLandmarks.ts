@@ -1,77 +1,104 @@
 import { POSE_INDEX, type PoseLandmark } from '../poseDetector';
-import { PRINT_ASPECT, PRINT_V, PRINT_W_UV } from '../modelAssets';
-import { lerpPt, type Pt, type Quad } from './types';
+import { PRINT_ASPECT, PRINT_W_UV } from '../modelAssets';
+import { type Pt, type Quad } from './types';
 
-// Calibration of MediaPipe landmarks against the cloth, in normalized
-// cloth-V units (V=0 at cloth top, V=1 at hem).
-//
-// MIDSHOULDER_CLOTH_V: MediaPipe's shoulder joints sit at the deltoid
-//   attachment, ~5-7 cm below the cloth's top corner (which is the shoulder
-//   seam). At cloth-center this is roughly the neckline level → V ≈ 0.10.
-// MIDHIP_CLOTH_V:      The hem extends below the hip joint by ~6-8 cm on a
-//   typical t-shirt → hip-joint at V ≈ 0.90.
-// SHOULDER_SPAN_OF_CLOTH_W: the cloth extends past the shoulder joints out
-//   to the sleeve attachment, so detected shoulder span is ~0.85× cloth W.
-const MIDSHOULDER_CLOTH_V = 0.10;
-const MIDHIP_CLOTH_V = 0.90;
+// Calibration constants. Print width is a fixed fraction of shoulder
+// span (the cloth extends past landmark shoulders by SHOULDER_SPAN_OF_CLOTH_W;
+// drives off PRINT_W_UV so 3D / UV editor / photos stay in sync).
 const SHOULDER_SPAN_OF_CLOTH_W = 0.85;
-
-const BODY_AXIS_CLOTH_V_RANGE = MIDHIP_CLOTH_V - MIDSHOULDER_CLOTH_V;
-// Top-of-print position along the shoulder→hip axis (parametric t).
-const PRINT_TOP_T = (PRINT_V - MIDSHOULDER_CLOTH_V) / BODY_AXIS_CLOTH_V_RANGE;
-// Print width (cloth fraction) → fraction of shoulder span via calibration.
-// Drives off PRINT_W_UV so 3D / UV editor / photos all stay in sync.
 const PRINT_W_FRAC = PRINT_W_UV / SHOULDER_SPAN_OF_CLOTH_W;
 
+// Distance from midshoulder to print top, measured along the body
+// vertical (perpendicular to the shoulder line) in fractions of
+// shoulderLen. 0.35 lands the top of the print at upper chest just
+// below the collar — same vertical position the earlier spine-lerp
+// gave with PRINT_TOP_T=0.20 on standing-upright bodies.
+const PRINT_DESCENT = 0.35;
+
+// Tilt-driven lateral offset gain — how much the print shifts in the
+// lean direction per unit tilt. Empirical scale: 1.0 means at 10° tilt
+// the print shifts by sin(10°) × shoulderLen ≈ 17% of shoulderLen
+// (~40 px on a 250 px shoulder span). Dial down if the print
+// over-shoots, up if lean tracking feels too subtle.
+const TILT_OFFSET_GAIN = 1.0;
+
+// SHOULDER-ONLY pose-to-quad. Iteration history:
+//   1. Shoulder + hip angle average (original): noisy when one hip
+//      occluded (hand-on-hip).
+//   2. Spine-perp (mid-shoulder → mid-hip rotated 90°): captured lean
+//      but drifted under bad hip landmarks.
+//   3. Visibility-weighted spine-perp: INVENTED fake leans because
+//      weighting biased midhip toward the visible side on a symmetric
+//      body, making the print drift off-chest on hand-on-hip poses.
+//   4. (This) Shoulder-only with tilt-driven offset. Drop hip entirely
+//      since it's unreliable in practical fashion poses. Use shoulder
+//      midpoint as anchor, shoulder-line angle as tilt, and add an
+//      explicit lateral offset proportional to sin(tilt) so the print
+//      tracks the lean direction without needing hip data.
 export function quadFromLandmarks(lm: PoseLandmark[], w: number, h: number): Quad {
   const ls = lm[POSE_INDEX.leftShoulder];
   const rs = lm[POSE_INDEX.rightShoulder];
-  const lh = lm[POSE_INDEX.leftHip];
-  const rh = lm[POSE_INDEX.rightHip];
-  const toPt = (p: PoseLandmark): Pt => ({ x: p.x * w, y: p.y * h });
-  const leftShoulder = toPt(ls);
-  const rightShoulder = toPt(rs);
-  const leftHip = toPt(lh);
-  const rightHip = toPt(rh);
+  const leftShoulder: Pt = { x: ls.x * w, y: ls.y * h };
+  const rightShoulder: Pt = { x: rs.x * w, y: rs.y * h };
 
-  const topMid: Pt = {
+  const midshoulder: Pt = {
     x: (leftShoulder.x + rightShoulder.x) / 2,
     y: (leftShoulder.y + rightShoulder.y) / 2,
   };
-  const botMid: Pt = {
-    x: (leftHip.x + rightHip.x) / 2,
-    y: (leftHip.y + rightHip.y) / 2,
-  };
-
-  const printTop = lerpPt(topMid, botMid, PRINT_TOP_T);
 
   const shoulderAngle = Math.atan2(
     leftShoulder.y - rightShoulder.y,
     leftShoulder.x - rightShoulder.x
   );
-  const hipAngle = Math.atan2(
-    leftHip.y - rightHip.y,
-    leftHip.x - rightHip.x
-  );
-  const tiltAngle = (shoulderAngle + hipAngle) / 2;
 
   const shoulderLen = Math.hypot(
     leftShoulder.x - rightShoulder.x,
     leftShoulder.y - rightShoulder.y
   );
+
+  // Body vertical = perpendicular to shoulder line, pointing into the
+  // body (positive y in screen y-down for level shoulders).
+  // For shoulderAngle α: shoulder direction is (cos α, sin α);
+  // perpendicular into body is (−sin α, cos α).
+  const bodyDownX = -Math.sin(shoulderAngle);
+  const bodyDownY = Math.cos(shoulderAngle);
+
+  // Base anchor: midshoulder + body-vertical descent by PRINT_DESCENT
+  // fraction of shoulderLen. For a leaning body this naturally tilts
+  // the descent direction so the anchor follows the body's orientation.
+  const descent = shoulderLen * PRINT_DESCENT;
+  const baseAnchorX = midshoulder.x + bodyDownX * descent;
+  const baseAnchorY = midshoulder.y + bodyDownY * descent;
+
+  // Tilt-driven lateral offset. sin(α) > 0 when shoulderAngle is
+  // positive (left shoulder lower than right in screen y-down = body
+  // leaning toward screen-right). Add a horizontal X shift proportional
+  // to sin(α) × shoulderLen so the print moves in the lean direction.
+  //   Level shoulders: sin(0) = 0 → no extra shift, print at midshoulder.x.
+  //   Body leans screen-right (shoulderAngle > 0): print shifts right.
+  //   Body leans screen-left (shoulderAngle < 0): print shifts left.
+  // This matches the user's "body leans right → pattern shifts right"
+  // mental model regardless of which side is interpreted as "right".
+  const tiltOffset = Math.sin(shoulderAngle) * shoulderLen * TILT_OFFSET_GAIN;
+  const printTop: Pt = {
+    x: baseAnchorX + tiltOffset,
+    y: baseAnchorY,
+  };
+
+  const tiltAngle = shoulderAngle;
   const halfW = shoulderLen * 0.5 * PRINT_W_FRAC;
   const halfX = Math.cos(tiltAngle) * halfW;
   const halfY = Math.sin(tiltAngle) * halfW;
 
   const printedW = halfW * 2;
   const printedH = printedW / PRINT_ASPECT;
-  const downX = -Math.sin(tiltAngle) * printedH;
-  const downY = Math.cos(tiltAngle) * printedH;
+  const offDownX = -Math.sin(tiltAngle) * printedH;
+  const offDownY = Math.cos(tiltAngle) * printedH;
 
   return {
     tl: { x: printTop.x - halfX, y: printTop.y - halfY },
     tr: { x: printTop.x + halfX, y: printTop.y + halfY },
-    bl: { x: printTop.x - halfX + downX, y: printTop.y - halfY + downY },
-    br: { x: printTop.x + halfX + downX, y: printTop.y + halfY + downY },
+    bl: { x: printTop.x - halfX + offDownX, y: printTop.y - halfY + offDownY },
+    br: { x: printTop.x + halfX + offDownX, y: printTop.y + halfY + offDownY },
   };
 }

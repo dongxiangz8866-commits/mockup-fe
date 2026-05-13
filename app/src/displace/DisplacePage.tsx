@@ -55,13 +55,13 @@ export default function DisplacePage() {
   const strength = 1.0;
   const [depthWrapStrength, setDepthWrapStrength] = useState(5.0);
   const [debug, setDebugMode] = useState<DebugMode>('composite');
-  // Default 0 — the photo-shading-driven local fold push (uWrinkleStrength)
-  // has fundamental limits documented in memory: any non-zero value risks
-  // dye/weave/printed-pattern artefacts on patterned shirts. The clean,
-  // reliable baseline is macro depth wrap + light multiply alone. Users
-  // who want to experiment with local fold conformity on plain shirts can
-  // dial up; on patterned shirts (tie-dye, marble, weave-prints) leave at 0.
-  const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(0);
+  // Default 1.0 — restored after the mesh-warp refactor (2026-05-13) moved
+  // the fold push from per-fragment to per-vertex sampling. The artefacts
+  // that forced default=0 on the per-fragment version (wave fragmentation,
+  // horizontal slashes on tie-dye) can't occur structurally with mesh
+  // interpolation: vertex spacing IS the low-pass, and GPU bilinear
+  // guarantees a smooth UV field between vertices.
+  const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(1.0);
 
   // Photo + pose + maps pipeline.
   useEffect(() => {

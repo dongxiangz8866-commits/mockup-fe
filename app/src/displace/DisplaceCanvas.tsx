@@ -160,7 +160,19 @@ export default function DisplaceCanvas(p: Props) {
       style={{ width: '100%', height: '100%' }}
     >
       <mesh>
-        <planeGeometry args={[2, 2]} />
+        {/* 32×32 subdivision = 1089 vertices. Vertex shader samples the
+            warp sources at each vertex and outputs the warped pattern UV
+            as a varying; GPU interpolates between adjacent vertices →
+            smooth pattern warp across the print area without per-pixel
+            artefacts (the wave/slash failure mode the per-fragment warp
+            kept producing). See displaceShader.ts for the architecture
+            rationale.
+
+            Vertex density: at a 1500-px-wide photo, 32 segments places
+            vertices ~47 px apart. Folds smaller than that are smoothed
+            into the interpolation; folds larger than 50 px (the regime
+            the user actually cares about) bend the print smoothly. */}
+        <planeGeometry args={[2, 2, 32, 32]} />
         <shaderMaterial
           vertexShader={vert}
           fragmentShader={frag}
