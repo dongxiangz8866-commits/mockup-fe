@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <rect width="1200" height="1200" fill="none"/>
+  <ellipse cx="600" cy="980" rx="280" ry="36" fill="#000000" fill-opacity="0.18"/>
+  <path d="M400 700Q400 460 600 460Q800 460 800 700L780 880Q780 940 720 940L480 940Q420 940 420 880Z" fill="#ff9f1c"/>
+  <path d="M420 560Q400 420 510 380L540 460Z" fill="#ff9f1c"/>
+  <path d="M780 560Q800 420 690 380L660 460Z" fill="#ff9f1c"/>
+  <path d="M455 555Q440 470 505 430L520 510Z" fill="#fdbb2d"/>
+  <path d="M745 555Q760 470 695 430L680 510Z" fill="#fdbb2d"/>
+  <ellipse cx="600" cy="640" rx="170" ry="160" fill="#fff5e1"/>
+  <circle cx="540" cy="620" r="28" fill="#0b132b"/>
+  <circle cx="660" cy="620" r="28" fill="#0b132b"/>
+  <circle cx="550" cy="610" r="9" fill="#ffffff"/>
+  <circle cx="670" cy="610" r="9" fill="#ffffff"/>
+  <path d="M580 680Q600 700 620 680L600 712Z" fill="#0b132b"/>
+  <path d="M520 730Q600 790 680 730" stroke="#0b132b" stroke-width="10" fill="none" stroke-linecap="round"/>
+  <circle cx="470" cy="700" r="22" fill="#ff6b6b" fill-opacity="0.7"/>
+  <circle cx="730" cy="700" r="22" fill="#ff6b6b" fill-opacity="0.7"/>
+  <g stroke="#0b132b" stroke-width="8" fill="none" stroke-linecap="round">
+    <path d="M340 660Q260 640 220 700"/>
+    <path d="M860 660Q940 640 980 700"/>
+  </g>
+</svg>

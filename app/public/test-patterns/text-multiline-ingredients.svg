@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <rect width="1200" height="1200" fill="none"/>
+  <g font-family="Helvetica, Arial, sans-serif" fill="#0a0a0a">
+    <text x="600" y="360" text-anchor="middle" font-size="58" font-weight="800" letter-spacing="6">INGREDIENTS</text>
+    <line x1="320" y1="392" x2="880" y2="392" stroke="#0a0a0a" stroke-width="3"/>
+    <text x="600" y="450" text-anchor="middle" font-size="28" font-weight="400">100% organic cotton · pre-shrunk · made in Portugal</text>
+    <text x="600" y="495" text-anchor="middle" font-size="28" font-weight="400">water-based ink · OEKO-TEX certified · 180 gsm</text>
+    <text x="600" y="540" text-anchor="middle" font-size="28" font-weight="400">no animal byproducts · vegan · ethically sourced</text>
+    <text x="600" y="585" text-anchor="middle" font-size="28" font-weight="400">machine wash cold · do not bleach · tumble dry low</text>
+    <text x="600" y="630" text-anchor="middle" font-size="28" font-weight="400">iron on reverse · do not dry clean · made to last</text>
+    <line x1="320" y1="665" x2="880" y2="665" stroke="#0a0a0a" stroke-width="3"/>
+    <text x="600" y="715" text-anchor="middle" font-size="22" font-weight="600" letter-spacing="3">BATCH 2026-05 · LOT A47 · SKU MB-T-001-WHT-M</text>
+    <text x="600" y="755" text-anchor="middle" font-size="22" font-weight="400" letter-spacing="2">designed in shanghai · printed on demand</text>
+    <text x="600" y="810" text-anchor="middle" font-size="20" font-weight="400">© 2026 memebuy collective — all rights reserved</text>
+  </g>
+</svg>

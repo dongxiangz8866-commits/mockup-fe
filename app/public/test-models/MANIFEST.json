@@ -1,0 +1,210 @@
+{
+  "$comment": "Dimension labels for /displace test-model selection. Schema v1, generated 2026-05-13, round-4 audit removed 10 entries where chest is geometrically not in frame (portrait crops, 90° side, zipper splits chest, henley buttons, lying overhead). See docs/TEST_PLAN.md §2 for c/p/w semantics, docs/TEST_ASSETS.md for source attribution.",
+  "version": 1,
+  "generatedAt": "2026-05-13",
+  "models": [
+    {
+      "file": "hoodie-white-city-pexels-10285696.jpg",
+      "c": "C1", "p": "P1", "w": "W4",
+      "garment": "hoodie",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "白卫衣 全身远景"
+    },
+    {
+      "file": "longsleeve-black-front-pexels-11000250.jpg",
+      "c": "C2", "p": "P2", "w": "W2",
+      "garment": "longsleeve",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "黑长袖针织（粉领衬衫探出领口，胸口区域干净）"
+    },
+    {
+      "file": "longsleeve-white-man-front-pexels-8727340.jpg",
+      "c": "C1", "p": "P1", "w": "W3",
+      "garment": "longsleeve",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "白长袖 宽松褶皱"
+    },
+    {
+      "file": "tshirt-black-front-pexels-26125921.jpg",
+      "c": "C2", "p": "P1", "w": "W2",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "黑短袖 正面 完整上衣"
+    },
+    {
+      "file": "tshirt-green-front-pexels-19107957.jpg",
+      "c": "C4", "p": "P1", "w": "W2",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "中亮绿 户外光"
+    },
+    {
+      "file": "tshirt-red-front-pexels-8211326.jpg",
+      "c": "C4", "p": "P4", "w": "W2",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": true, "hasAccessory": false,
+      "notes": "高饱和红 手部接近胸口"
+    },
+    {
+      "file": "tshirt-white-front-complete-pexels-8217507.jpg",
+      "c": "C1", "p": "P1", "w": "W1",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "白短袖 全身远景 平整"
+    },
+    {
+      "file": "tshirt-white-pose-pexels-9558713.jpg",
+      "c": "C1", "p": "P2", "w": "W2",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "白短袖 轻微姿势变化"
+    },
+    {
+      "file": "tshirt-black-arms-crossed-pexels-4584267.jpg",
+      "c": "C2", "p": "P4", "w": "W2",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": true, "hasAccessory": false,
+      "notes": "黑 T 交叉手臂横跨胸口"
+    },
+    {
+      "file": "tshirt-orange-hair-strap-pexels-1848468.jpg",
+      "c": "C4", "p": "P5", "w": "W2",
+      "garment": "tshirt",
+      "hasHairOcclusion": true, "hasHandOcclusion": false, "hasAccessory": true,
+      "notes": "红橙 + 长发遮胸 + denim 背带横跨胸口（S6 配饰干扰）"
+    },
+    {
+      "file": "tshirt-black-studio-mart-pexels-9558252.jpg",
+      "c": "C2", "p": "P1", "w": "W2",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "★ Mart Production 工作室黑 oversized T 完整展示 + 双手指向胸口两侧不遮"
+    },
+    {
+      "file": "tshirt-white-studio-mart-pexels-6786614.jpg",
+      "c": "C1", "p": "P1", "w": "W1",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "★ Mart 工作室纯白短袖 + 米色背景 + 平整新衣（W1 平整标杆）"
+    },
+    {
+      "file": "tshirt-brown-front-pexels-9558684.jpg",
+      "c": "C3", "p": "P1", "w": "W2",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "★ Mart 工作室深棕/橄榄 T + 卷发落肩不遮胸"
+    },
+    {
+      "file": "tshirt-neon-green-fullbody-pexels-2777067.jpg",
+      "c": "C5", "p": "P6", "w": "W2",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": true, "hasAccessory": true,
+      "notes": "★ 霓虹绿 oversized T 全身户外 + 蹲姿 + 银色斜挎袋部分遮左胸"
+    },
+    {
+      "file": "sleeveless-black-fullbody-pexels-2896427.jpg",
+      "c": "C2", "p": "P1", "w": "W2",
+      "garment": "sleeveless",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": true,
+      "notes": "黑无袖完整展示 + 外搭印花夹克（不遮胸）"
+    },
+    {
+      "file": "tshirt-orange-fullbody-pexels-2221132.jpg",
+      "c": "C4", "p": "P4", "w": "W5",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": true, "hasAccessory": false,
+      "notes": "橙 T 户外 + 手在胸前 + 阳光透叶斑驳光斑（W5 户外光斑变体）"
+    },
+    {
+      "file": "tshirt-blue-excited-pexels-3768724.jpg",
+      "c": "C4", "p": "P1", "w": "W2",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "中亮蓝/青绿 T + 双拳举到肩部（不挡胸）"
+    },
+    {
+      "file": "tshirt-mart-black-oversized-pexels-9558577.jpg",
+      "c": "C2", "p": "P1", "w": "W2",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "★ Mart 工作室黑色 oversized T 完整展示 + 卷发男士侧脸"
+    },
+    {
+      "file": "tshirt-gray-wakeup-pexels-5990953.jpg",
+      "c": "C2", "p": "P6", "w": "W3",
+      "garment": "tshirt",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "灰短袖 床上起床伸展 + 衣服明显褶皱（W3 标杆 + P6 卧）"
+    },
+    {
+      "file": "longsleeve-white-mug-pexels-6823493.jpg",
+      "c": "C1", "p": "P1", "w": "W2",
+      "garment": "longsleeve",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "米色 cream crewneck 长袖卫衣 + 室内桌前完整上半身（罕见 LS 完整展示）"
+    },
+    {
+      "file": "hoodie-yellow-cap-pexels-6332442.jpg",
+      "c": "C4", "p": "P1", "w": "W2",
+      "garment": "hoodie",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": true,
+      "notes": "亮黄 hoodie + 工作室 + 黑帽 + 双手交握在腹下"
+    },
+    {
+      "file": "hoodie-yellow-dance-pexels-1183266.jpg",
+      "c": "C4", "p": "P2", "w": "W2",
+      "garment": "hoodie",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "亮黄 hoodie + 城市建筑户外 + 戴 hood + 侧身"
+    },
+    {
+      "file": "hoodie-green-sit-pexels-4114920.jpg",
+      "c": "C3", "p": "P6", "w": "W4",
+      "garment": "hoodie",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "橄榄/苔绿 hoodie + 棕皮沙发卧躺 + 戴 hood（C3+P6 卧）"
+    },
+    {
+      "file": "hoodie-pink-woman-pexels-6543909.jpg",
+      "c": "C5", "p": "P1", "w": "W2",
+      "garment": "hoodie",
+      "hasHairOcclusion": false, "hasHandOcclusion": false, "hasAccessory": false,
+      "notes": "★ 粉色 hoodie 完整展示 + 紫色背景 + 戴 hood + 双手扶 hood 不挡胸（C5 hoodie 首例）"
+    }
+  ],
+  "dimensions": {
+    "c": {
+      "C1": "white / light gray / cream",
+      "C2": "black / deep gray",
+      "C3": "deep colored (navy, deep green, deep purple, wine red, brown, olive)",
+      "C4": "mid-bright colored (red, blue, green, yellow, khaki, orange)",
+      "C5": "high-saturation neon / hot (bright yellow, fluorescent green, hot pink, fuchsia)"
+    },
+    "p": {
+      "P1": "frontal standing, shoulders level, chest fully visible",
+      "P2": "slight side rotation 15–30°",
+      "P3": "strong side ≥45°, may include full 90° profile",
+      "P4": "arm or hand occluding chest area",
+      "P5": "hair occluding chest area",
+      "P6": "seated / lying / bent torso"
+    },
+    "w": {
+      "W1": "flat / smooth (studio fresh)",
+      "W2": "light everyday wrinkles",
+      "W3": "pronounced vertical wrinkles on chest or abdomen",
+      "W4": "large soft folds (loose hoodie, oversized tee)",
+      "W5": "strong local shadow from hair / hand / window / light"
+    },
+    "garment": ["tshirt", "longsleeve", "hoodie", "sleeveless"]
+  },
+  "gaps": [
+    "round-4 净空 10 张胸口不入框 / 拉链开襟 / 90°完全侧身样本后,以下维度空缺待补:",
+    "C3 navy/dark blue T-shirt (round-3 唯一 navy 是 portrait crop,已剔除)",
+    "C4/C5 pink T-shirt (kept 仅 hoodie 有粉色)",
+    "C5 还想再加亮粉 hot pink T / 荧光黄 T 变体",
+    "P3 强侧身 ≥45° 样本目前 0 张 (round-3 唯一 P3 是 90°完全侧身已剔除)",
+    "back-print 测试样本目前 0 张 — 用户要求 '胸前或者背后',需要纯背面或大角度背身样本",
+    "干净 C2 黑 / C3 灰 pullover hoodie (zip-up hoodie 不算)",
+    "更多 longsleeve crewneck 真长袖 (非 button-up,非毛衣)"
+  ]
+}

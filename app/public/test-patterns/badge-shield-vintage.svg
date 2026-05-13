@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <rect width="1200" height="1200" fill="none"/>
+  <path d="M600 220L880 320L860 660Q860 820 600 960Q340 820 340 660L320 320Z" fill="#7a1f1f" stroke="#1a1a1a" stroke-width="12"/>
+  <path d="M600 280L820 360L805 635Q805 765 600 880Q395 765 395 635L380 360Z" fill="#f4ead5"/>
+  <g font-family="Georgia, 'Times New Roman', serif" fill="#1a1a1a" text-anchor="middle">
+    <text x="600" y="470" font-size="68" font-weight="700" letter-spacing="6">MEMEBUY</text>
+    <text x="600" y="555" font-size="36" font-weight="400" letter-spacing="8">— COLLECTIVE —</text>
+    <text x="600" y="700" font-size="120" font-weight="900" font-style="italic">M</text>
+    <text x="600" y="800" font-size="32" font-weight="400" letter-spacing="6">est. 2026</text>
+  </g>
+  <g stroke="#1a1a1a" stroke-width="4" fill="none">
+    <line x1="440" y1="580" x2="760" y2="580"/>
+    <circle cx="600" cy="580" r="14" fill="#7a1f1f"/>
+  </g>
+</svg>

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <defs>
+    <pattern id="flowers" width="200" height="200" patternUnits="userSpaceOnUse">
+      <rect width="200" height="200" fill="#1a3a2e"/>
+      <g transform="translate(100 100)">
+        <circle r="40" fill="#f4a261"/>
+        <circle cx="-22" cy="-22" r="16" fill="#e76f51"/>
+        <circle cx="22" cy="-22" r="16" fill="#e76f51"/>
+        <circle cx="-22" cy="22" r="16" fill="#e76f51"/>
+        <circle cx="22" cy="22" r="16" fill="#e76f51"/>
+        <circle r="15" fill="#fefae0"/>
+        <circle r="6" fill="#bc6c25"/>
+      </g>
+      <g transform="translate(0 0)" opacity="0.6">
+        <circle r="22" fill="#a4c3a0"/>
+        <circle cx="-12" cy="-12" r="9" fill="#83a47a"/>
+      </g>
+      <g transform="translate(200 200)" opacity="0.6">
+        <circle r="22" fill="#a4c3a0"/>
+        <circle cx="-12" cy="-12" r="9" fill="#83a47a"/>
+      </g>
+      <g transform="translate(200 0)" opacity="0.6">
+        <circle r="22" fill="#a4c3a0"/>
+        <circle cx="-12" cy="-12" r="9" fill="#83a47a"/>
+      </g>
+      <g transform="translate(0 200)" opacity="0.6">
+        <circle r="22" fill="#a4c3a0"/>
+        <circle cx="-12" cy="-12" r="9" fill="#83a47a"/>
+      </g>
+      <path d="M60 60Q100 80 140 60M60 140Q100 120 140 140" stroke="#83a47a" stroke-width="3" fill="none"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="1200" fill="url(#flowers)"/>
+  <rect width="1200" height="1200" fill="none" stroke="#0a0a0a" stroke-width="6"/>
+</svg>

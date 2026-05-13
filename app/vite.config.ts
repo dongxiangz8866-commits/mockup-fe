@@ -3,7 +3,9 @@ import react from '@vitejs/plugin-react';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const MODEL_DIRS = ['public/models', 'public/test-models'];
+// 2026-05-13: hide /models/ originals from picker — only test-models/ shows.
+// Source files stay on disk for reference; just removed from scan list.
+const MODEL_DIRS = ['public/test-models'];
 const PATTERN_DIR = 'public/test-patterns';
 const PATTERN = /\.(png|jpe?g|webp)$/i;
 const PATTERN_ASSET = /\.(png|jpe?g|webp|svg)$/i;
