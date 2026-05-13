@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import * as THREE from 'three';
 import { detectPoseCached, type PoseLandmark } from '../poseDetector';
 import {
   quadFromLandmarks,
@@ -8,6 +9,20 @@ import {
   type Quad,
   type SceneSample,
 } from '../shading';
+import DisplaceCanvas, { type DebugMode } from './DisplaceCanvas';
+import { deriveMaps, type DerivedMaps } from './MapPipeline';
+import PatternPicker from './PatternPicker';
+import PhotoPicker from './PhotoPicker';
+import QuadHandles from './QuadHandles';
+import { sampleDepthStats } from './depthStats';
+import { dataCanvasToTexture, loadImage } from './textures';
+import { useDepthMap } from './useDepthMap';
+import { useDisplaceTextures } from './useDisplaceTextures';
+import { useHairMask } from './useHairMask';
+import { useQuadDrag } from './useQuadDrag';
+import s from './DisplacePage.module.css';
+
+type LoadState = 'idle' | 'loading' | 'pose' | 'maps' | 'ready' | 'fail';
 
 // Photo-keyed garment cache. sampleGarment is heavy (full-frame getImageData
 // on a 2K photo = ~100 ms). Without this, dragging the print recomputed it on
@@ -18,20 +33,6 @@ const garmentMemCache = new Map<string, GarmentSample>();
 // Same rationale as garmentMemCache: env color is a SCENE property and does
 // not change as the user drags the print around. Keyed by photoSrc only.
 const sceneMemCache = new Map<string, SceneSample>();
-import DisplaceCanvas, { type DebugMode } from './DisplaceCanvas';
-import { deriveMaps, type DerivedMaps } from './MapPipeline';
-import PhotoPicker from './PhotoPicker';
-import { dataCanvasToTexture, loadImage } from './textures';
-import { useDepthMap } from './useDepthMap';
-import { useDisplaceTextures } from './useDisplaceTextures';
-import { useHairMask } from './useHairMask';
-import { useQuadDrag } from './useQuadDrag';
-import s from './DisplacePage.module.css';
-import * as THREE from 'three';
-
-type DispSource = 'dog' | 'depth';
-
-type LoadState = 'idle' | 'loading' | 'pose' | 'maps' | 'ready' | 'fail';
 
 export default function DisplacePage() {
   const [photoSrc, setPhotoSrc] = useState<string | null>(null);
@@ -43,7 +44,7 @@ export default function DisplacePage() {
   const [maps, setMaps] = useState<DerivedMaps | null>(null);
   const [status, setStatus] = useState<LoadState>('idle');
 
-  const [strength, setStrength] = useState(1.0);
+  const [scale, setScale] = useState(1.0);
   const [light, setLightStrength] = useState(1.0);
   const [sceneBrightness, setSceneBrightness] = useState(1.0);
   // lift kept at 0 by request — sceneBrightness alone is enough for
@@ -51,10 +52,10 @@ export default function DisplacePage() {
   // removed from UI; uniform still wired in case we re-introduce later.
   const lift = 0.0;
   const tint = 0.5;
+  const strength = 1.0;
   const [depthWrapStrength, setDepthWrapStrength] = useState(5.0);
-  const [reverseDisp, setReverseDisp] = useState(false);
-  const [dispSource, setDispSource] = useState<DispSource>('depth');
   const [debug, setDebugMode] = useState<DebugMode>('composite');
+  const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(1.0);
 
   // Photo + pose + maps pipeline.
   useEffect(() => {
@@ -170,27 +171,44 @@ export default function DisplacePage() {
     [hairTex]
   );
 
-  const displaceTex: THREE.Texture | null =
-    dispSource === 'depth' && depthTex ? depthTex : dogDisplaceTex;
-  const depthWrap = dispSource === 'depth' && depthTex ? depthWrapStrength : 0.0;
-  const printCenterUV: [number, number] = useMemo(() => {
-    if (!quad || !photoSize) return [0.5, 0.5];
-    const cx = (quad.tl.x + quad.tr.x + quad.bl.x + quad.br.x) / 4 / photoSize.w;
-    const cy = (quad.tl.y + quad.tr.y + quad.bl.y + quad.br.y) / 4 / photoSize.h;
-    return [cx, cy];
-  }, [quad, photoSize]);
+  // Depth handles broad torso curvature. The DoG/Sobel displacement map stays
+  // wired as a separate wrinkle-depth detail layer so fine cloth folds still
+  // bend the pattern when the ML depth path is active.
+  const displaceTex: THREE.Texture | null = depthTex ?? dogDisplaceTex;
+  const wrinkleDisplaceTex = dogDisplaceTex;
+  const depthWrap = depthTex ? depthWrapStrength : 0.0;
 
-  // CPU-side zCenter: sample the depth canvas at the print center ONCE per
-  // (depth, printCenterUV) change instead of letting every fragment re-sample
-  // the same texel. The depth path's per-fragment cost drops by one
-  // texture2D() — small per-frame win but cleaner for high-DPR canvases.
-  const zCenter = useMemo(() => {
-    if (!depthResult.depth) return 0.5;
-    const c = depthResult.depth;
-    const x = Math.max(0, Math.min(c.width - 1, Math.round(printCenterUV[0] * c.width)));
-    const y = Math.max(0, Math.min(c.height - 1, Math.round(printCenterUV[1] * c.height)));
-    return c.getContext('2d')!.getImageData(x, y, 1, 1).data[0] / 255;
-  }, [depthResult.depth, printCenterUV]);
+  // User-controlled pattern size: scale the pose-detected quad around its
+  // own center. Drag still operates on the unscaled `quad` (translation
+  // commutes with scale-around-current-center), so cursor tracking stays
+  // 1:1 regardless of scale.
+  const scaledQuad = useMemo<Quad | null>(() => {
+    if (!quad) return null;
+    const cx = (quad.tl.x + quad.tr.x + quad.bl.x + quad.br.x) / 4;
+    const cy = (quad.tl.y + quad.tr.y + quad.bl.y + quad.br.y) / 4;
+    const s = scale;
+    const f = (p: { x: number; y: number }) => ({
+      x: cx + (p.x - cx) * s,
+      y: cy + (p.y - cy) * s,
+    });
+    return { tl: f(quad.tl), tr: f(quad.tr), bl: f(quad.bl), br: f(quad.br) };
+  }, [quad, scale]);
+
+  const printCenterUV: [number, number] = useMemo(() => {
+    if (!scaledQuad || !photoSize) return [0.5, 0.5];
+    const cx = (scaledQuad.tl.x + scaledQuad.tr.x + scaledQuad.bl.x + scaledQuad.br.x) / 4 / photoSize.w;
+    const cy = (scaledQuad.tl.y + scaledQuad.tr.y + scaledQuad.bl.y + scaledQuad.br.y) / 4 / photoSize.h;
+    return [cx, cy];
+  }, [scaledQuad, photoSize]);
+
+  // CPU-side depth stats: normalize weak DAv2 contrast inside the active
+  // print quad once per move/scale, rather than making every fragment guess
+  // from global depth bytes. This makes the wrap slider feel consistent
+  // across white studio shots, dark shirts, and wide full-body photos.
+  const depthStats = useMemo(
+    () => (depthResult.depth ? sampleDepthStats(depthResult.depth, scaledQuad) : { center: 0.5, range: 0.08 }),
+    [depthResult.depth, scaledQuad]
+  );
 
   // Sample garment color ONCE per src — see garmentMemCache comment above
   // for why we don't re-sample on quad change (drag).
@@ -270,8 +288,25 @@ export default function DisplacePage() {
     );
   }, [sceneSample, tint]);
   const drag = useQuadDrag(quad, setQuad, photoSize);
+
+  // Mouse-wheel / trackpad-pinch resize on the canvas. Bound via
+  // addEventListener with passive:false so we can preventDefault — React's
+  // synthetic onWheel is passive by default and silently ignores the call.
+  const stageRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      const dir = e.deltaY < 0 ? 1 : -1;
+      setScale((s) => Math.max(0.4, Math.min(2.0, s * (1 + dir * 0.05))));
+    };
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, []);
+
   const ready =
-    status === 'ready' && photoTex && patternTex && displaceTex && lightTex && shadingTex && quad && photoSize;
+    status === 'ready' && photoTex && patternTex && displaceTex && wrinkleDisplaceTex && lightTex && shadingTex && scaledQuad && photoSize;
 
   // Wrap setPhotoSrc so photo/quad/maps are cleared SYNCHRONOUSLY in the
   // same React 18 event batch. Without this, the render right after
@@ -291,51 +326,13 @@ export default function DisplacePage() {
     <main className={s.page} data-displace-status={status} data-depth-state={depthResult.state} data-hair-state={hairResult.state} data-photo-src={photoSrc ?? ''}>
       <div className={s.toolbar}>
         <PhotoPicker current={photoSrc} onPick={pickPhoto} />
-        <label className={s.uploadBtn}>
-          <input
-            type="file"
-            accept="image/*"
-            hidden
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) setPatternSrc(URL.createObjectURL(f));
-            }}
-          />
-          <span>选择图案</span>
-        </label>
+        <PatternPicker current={patternSrc} onPick={setPatternSrc} />
         <div className={s.controls}>
           <label className={s.range}>
-            强度 <input type="range" min={0} max={1} step={0.05} value={strength}
-              onChange={(e) => setStrength(Number(e.target.value))} />
-            <span>{strength.toFixed(2)}</span>
+            图案大小 <input type="range" min={0.4} max={2.0} step={0.02} value={scale}
+              onChange={(e) => setScale(Number(e.target.value))} />
+            <span>{scale.toFixed(2)}</span>
           </label>
-          <label className={s.range}>
-            <input type="checkbox" checked={reverseDisp}
-              onChange={(e) => setReverseDisp(e.target.checked)} />
-            反向位移
-          </label>
-          <div className={s.debugRadios}>
-            位移源:
-            <label>
-              <input
-                type="radio"
-                name="disp-source"
-                checked={dispSource === 'depth'}
-                onChange={() => setDispSource('depth')}
-              />
-              深度{depthResult.state === 'loading' && ' (跡中…)'}
-              {depthResult.state === 'fail' && ' (失败)'}
-            </label>
-            <label>
-              <input
-                type="radio"
-                name="disp-source"
-                checked={dispSource === 'dog'}
-                onChange={() => setDispSource('dog')}
-              />
-              DoG (旧)
-            </label>
-          </div>
           <label className={s.range}>
             光照 <input type="range" min={0} max={2} step={0.05} value={light}
               onChange={(e) => setLightStrength(Number(e.target.value))} />
@@ -349,8 +346,14 @@ export default function DisplacePage() {
           <label className={s.range}>
             贴合强度 <input type="range" min={0} max={30} step={0.5} value={depthWrapStrength}
               onChange={(e) => setDepthWrapStrength(Number(e.target.value))}
-              disabled={dispSource !== 'depth'} />
+              disabled={!depthTex} />
             <span>{depthWrapStrength.toFixed(1)}</span>
+          </label>
+          <label className={s.range}>
+            褶皱深度 <input type="range" min={0} max={3} step={0.05} value={wrinkleDepthStrength}
+              onChange={(e) => setWrinkleDepthStrength(Number(e.target.value))}
+              disabled={!wrinkleDisplaceTex} />
+            <span>{wrinkleDepthStrength.toFixed(2)}</span>
           </label>
           <div className={s.debugRadios}>
             {(['composite', 'displace', 'light', 'shading'] as DebugMode[]).map((m) => (
@@ -375,6 +378,7 @@ export default function DisplacePage() {
         )}
         {ready && (
           <div
+            ref={stageRef}
             className={s.canvasFrame}
             style={{ aspectRatio: `${aspect}`, cursor: drag.dragging ? 'grabbing' : 'grab' }}
             onPointerDown={drag.onPointerDown}
@@ -386,14 +390,17 @@ export default function DisplacePage() {
               photoTex={photoTex}
               patternTex={patternTex}
               displaceTex={displaceTex}
+              wrinkleDisplaceTex={wrinkleDisplaceTex}
               lightTex={lightTex}
               shadingTex={shadingTex}
               photoSize={photoSize}
-              quad={quad}
+              quad={scaledQuad}
               strength={strength}
-              dispSign={reverseDisp ? -1 : 1}
+              dispSign={1}
               depthWrap={depthWrap}
-              zCenter={zCenter}
+              wrinkleStrength={wrinkleDepthStrength}
+              zCenter={depthStats.center}
+              zRange={depthStats.range}
               printCenterUV={printCenterUV}
               envRGB={envRGB}
               garmentRGB={garmentRGB}
@@ -404,6 +411,15 @@ export default function DisplacePage() {
               lightStrength={light}
               debugMode={debug}
             />
+            {quad && (
+              <QuadHandles
+                quad={quad}
+                scaledQuad={scaledQuad}
+                photoSize={photoSize}
+                scale={scale}
+                setScale={setScale}
+              />
+            )}
           </div>
         )}
       </div>

@@ -1,4 +1,4 @@
-import { useModelUrls } from '../shading';
+import { usePatternUrls } from '../shading';
 import s from './DisplacePage.module.css';
 
 type Props = {
@@ -13,49 +13,47 @@ type Group = {
 };
 
 const GROUP_LABELS: Record<string, string> = {
-  tshirt: '短袖 T',
-  longsleeve: '长袖 T',
-  hoodie: '卫衣',
-  existing: '原有素材',
+  text: '文字',
+  illustration: '卡通 / Logo',
+  tone: '渐变 / 半透明',
+  line: '细线',
 };
 
 function cleanUrl(url: string) {
   return url.split('?')[0];
 }
 
-function modelGroup(url: string) {
-  const path = cleanUrl(url);
-  const name = path.split('/').pop() ?? '';
-  if (path.includes('/models/')) return 'existing';
-  if (name.includes('hoodie')) return 'hoodie';
-  if (name.includes('longsleeve')) return 'longsleeve';
-  return 'tshirt';
+function patternGroup(url: string) {
+  const name = cleanUrl(url).split('/').pop() ?? '';
+  if (name.startsWith('text-')) return 'text';
+  if (name.includes('gradient') || name.includes('transparent')) return 'tone';
+  if (name.includes('line')) return 'line';
+  return 'illustration';
 }
 
-function groupModels(urls: string[]): Group[] {
+function groupPatterns(urls: string[]): Group[] {
   const grouped = urls.reduce<Record<string, string[]>>((acc, url) => {
-    const key = modelGroup(url);
+    const key = patternGroup(url);
     acc[key] = [...(acc[key] ?? []), url];
     return acc;
   }, {});
-  return ['tshirt', 'longsleeve', 'hoodie', 'existing']
+  return ['text', 'illustration', 'tone', 'line']
     .filter((key) => grouped[key]?.length)
     .map((key) => ({ key, label: GROUP_LABELS[key], urls: grouped[key] }));
 }
 
-export default function PhotoPicker({ current, onPick }: Props) {
-  const presets = useModelUrls();
-  const groups = groupModels(presets);
+export default function PatternPicker({ current, onPick }: Props) {
+  const patterns = usePatternUrls();
+  const groups = groupPatterns(patterns);
 
   const handleFile = (file: File) => {
-    const url = URL.createObjectURL(file);
-    onPick(url);
+    onPick(URL.createObjectURL(file));
   };
 
   return (
     <div className={s.assetSection}>
       <div className={s.assetHeader}>
-        <span className={s.assetTitle}>模特图</span>
+        <span className={s.assetTitle}>图案</span>
         <label className={s.uploadBtn}>
           <input
             type="file"
@@ -66,20 +64,19 @@ export default function PhotoPicker({ current, onPick }: Props) {
               if (f) handleFile(f);
             }}
           />
-          <span>上传模特图</span>
+          <span>选择图案</span>
         </label>
       </div>
       <div className={s.assetGroups}>
         {groups.map((group) => (
           <section key={group.key} className={s.assetGroup} aria-label={group.label}>
             <div className={s.groupLabel}>{group.label}</div>
-            <div className={s.thumbs}>
+            <div className={s.patternThumbs}>
               {group.urls.map((url) => (
                 <button
                   key={url}
                   type="button"
-                  data-photo-src={url}
-                  className={`${s.thumb}${url === current ? ' ' + s.thumbActive : ''}`}
+                  className={`${s.patternThumb}${url === current ? ' ' + s.thumbActive : ''}`}
                   onClick={() => onPick(url)}
                   title={cleanUrl(url).split('/').pop() ?? ''}
                 >

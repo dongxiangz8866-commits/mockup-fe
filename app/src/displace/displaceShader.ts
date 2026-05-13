@@ -20,6 +20,7 @@ export const frag = /* glsl */ `
   uniform sampler2D uPhoto;
   uniform sampler2D uPattern;
   uniform sampler2D uDisplace;
+  uniform sampler2D uWrinkleDisplace;
   uniform sampler2D uLight;
   uniform sampler2D uShading;    // wide DoG raw — debug view only
   uniform sampler2D uHairMask;   // ML hair segmentation, R=1 hair, R=0 not hair (1×1 black canvas before model loads)
@@ -27,8 +28,10 @@ export const frag = /* glsl */ `
   uniform float uStrength;       // 0..1 slider — scales displace offset
   uniform float uDispSign;       // +1 = pattern flows into folds (default); -1 = reverse
   uniform float uDepthWrap;      // 0 = use Sobel-disp from uDisplace; >0 = treat uDisplace texture as RAW DEPTH and warp radially around uPrintCenterUV
+  uniform float uWrinkleStrength;// scales fine cloth wrinkle displacement on top of macro depth wrap
   uniform vec2  uPrintCenterUV;  // print quad center in PHOTO uv (top-down) — only used when uDepthWrap > 0
   uniform float uZCenter;        // depth at uPrintCenterUV, pre-computed CPU-side so the fragment shader doesn't re-sample the same texel per pixel
+  uniform float uZRange;         // robust local depth contrast inside print quad; normalizes weak DAv2 depth maps before applying the slider
   uniform vec3  uEnvRGB;         // photo-wide mean RGB (0..1), print quad masked out — env color cast estimate
   uniform vec3  uGarmentRGB;     // garment mean RGB (0..1) sampled from print quad top/bottom strips — used as a foreground-occlusion key (pixels far from this color are treated as hair / hands / etc. and keep the photo color instead of the print)
   uniform float uOcclusionStart; // color-distance where occlusion mask starts to fall (0 = match shirt, 1.732 = max distance). Smaller = aggressive (more pixels treated as foreground).
@@ -48,6 +51,9 @@ export const frag = /* glsl */ `
   uniform vec2  uQuadTR;
   uniform vec2  uQuadBL;
   uniform int   uDebugMode;    // 0=composite, 1=displace, 2=light
+
+  const float DEPTH_WRAP_GAIN = 0.10;
+  const float WRINKLE_AMP_PX = 16.0;
 
   // Affine inverse using TL / TR / BL — three points are enough to invert a
   // parallelogram, which is what the existing ModelGrid pipeline uses for the
@@ -71,6 +77,7 @@ export const frag = /* glsl */ `
     // dispCol always sampled so the 'displace' debug view keeps working
     // regardless of which path is active (Sobel vs depth radial warp).
     vec4 dispCol = texture2D(uDisplace, puv);
+    vec4 wrinkleCol = texture2D(uWrinkleDisplace, puv);
 
     vec2 puvWarped;
     if (uDepthWrap > 0.0) {
@@ -88,9 +95,23 @@ export const frag = /* glsl */ `
       // = cylinder wrap appearance, driven by actual depth not by a fixed
       // angle slider.
       float zHere = dispCol.r;
-      float drop = clamp((uZCenter - zHere) / max(uZCenter, 0.01), 0.0, 1.0);
+      // DAv2 contrast varies heavily by photo. In many front-facing shirt
+      // images the center-to-side depth delta is only 2–5% of the byte range,
+      // so the old center-relative formula makes the slider feel inert. Normalize
+      // by the local print-quad range and use abs() so the wrap still works
+      // when a model/backend emits the near/far convention inverted.
+      float drop = abs(uZCenter - zHere) / max(uZRange, 0.01);
+      drop = smoothstep(0.04, 1.0, clamp(drop, 0.0, 1.0));
       vec2 fromCenter = puv - uPrintCenterUV;
-      puvWarped = uPrintCenterUV + fromCenter * (1.0 + drop * uDepthWrap * uStrength * uDispSign);
+      puvWarped = uPrintCenterUV + fromCenter * (1.0 + drop * uDepthWrap * DEPTH_WRAP_GAIN * uStrength * uDispSign);
+
+      // Fine wrinkle displacement. The ML depth map is intentionally blurred
+      // to describe body curvature, so it cannot carry fabric creases. Use
+      // the photo-derived DoG/Sobel wrinkle field as a second depth-detail
+      // layer: macro depth bends the print around the torso, this local field
+      // sinks/raises it along cloth folds.
+      vec2 wrinkle = (wrinkleCol.rg - vec2(0.5)) * 2.0;
+      puvWarped += wrinkle * WRINKLE_AMP_PX * uWrinkleStrength * uDispSign / uPhotoSize;
     } else {
       // Original Sobel-of-DoG path.
       vec2 disp = (dispCol.rg - vec2(0.5)) * 2.0;     // [-1, 1]
@@ -102,10 +123,15 @@ export const frag = /* glsl */ `
 
     vec4 patCol = texture2D(uPattern, patUV);
     // Manual bounds: ClampToEdge would otherwise smear the pattern's edge
-    // pixels across the whole shirt outside [0,1].
-    float inside =
-      step(0.0, patUV.x) * step(patUV.x, 1.0) *
-      step(0.0, patUV.y) * step(patUV.y, 1.0);
+    // pixels across the whole shirt outside [0,1]. fwidth gives the patUV
+    // delta across one fragment; smoothstep over that band gives an exactly
+    // one-pixel-wide soft cut at each quad edge — kills the stair-stepping
+    // jaggies that the hard step() form produced, especially when the print
+    // is small and the screen-edge slope is gentle.
+    vec2 fw = max(fwidth(patUV), vec2(1e-4));
+    vec2 lo = smoothstep(vec2(0.0), fw, patUV);
+    vec2 hi = vec2(1.0) - smoothstep(vec2(1.0) - fw, vec2(1.0), patUV);
+    float inside = lo.x * lo.y * hi.x * hi.y;
     patCol.a *= inside;
 
     // Environmental chromatic adaptation, sourced from the full-photo mean
@@ -226,14 +252,17 @@ export type DisplaceUniforms = {
   uPhoto: { value: THREE.Texture | null };
   uPattern: { value: THREE.Texture | null };
   uDisplace: { value: THREE.Texture | null };
+  uWrinkleDisplace: { value: THREE.Texture | null };
   uLight: { value: THREE.Texture | null };
   uShading: { value: THREE.Texture | null };
   uHairMask: { value: THREE.Texture | null };
   uStrength: { value: number };
   uDispSign: { value: number };
   uDepthWrap: { value: number };
+  uWrinkleStrength: { value: number };
   uPrintCenterUV: { value: THREE.Vector2 };
   uZCenter: { value: number };
+  uZRange: { value: number };
   uEnvRGB: { value: THREE.Vector3 };
   uGarmentRGB: { value: THREE.Vector3 };
   uOcclusionStart: { value: number };
@@ -254,14 +283,17 @@ export function makeUniforms(): DisplaceUniforms {
     uPhoto: { value: null },
     uPattern: { value: null },
     uDisplace: { value: null },
+    uWrinkleDisplace: { value: null },
     uLight: { value: null },
     uShading: { value: null },
     uHairMask: { value: null },
     uStrength: { value: 1.0 },
     uDispSign: { value: 1.0 },
     uDepthWrap: { value: 0.0 },                       // 0 = Sobel disp; depth path enables this
+    uWrinkleStrength: { value: 1.0 },
     uPrintCenterUV: { value: new THREE.Vector2(0.5, 0.5) },
     uZCenter: { value: 0.5 },
+    uZRange: { value: 0.08 },
     uEnvRGB: { value: new THREE.Vector3(0.5, 0.5, 0.5) },
     uGarmentRGB: { value: new THREE.Vector3(0.5, 0.5, 0.5) },
     uOcclusionStart: { value: 0.15 },

@@ -8,19 +8,50 @@
 
 .toolbar {
   display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 16px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  padding: 12px 16px;
   border-bottom: 1px solid #eaecef;
   background: #ffffff;
-  flex-wrap: wrap;
 }
 
-.picker {
+.assetSection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.assetHeader {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.assetTitle {
+  color: #111827;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.assetGroups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.assetGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.groupLabel {
+  color: #6b7280;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .uploadBtn {
@@ -42,10 +73,12 @@
 .thumbs {
   display: flex;
   gap: 6px;
-  align-items: center;
-  overflow-x: auto;
-  max-width: 60vw;
-  padding-bottom: 2px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  max-height: 132px;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 1px 2px 2px 1px;
 }
 
 .thumb {
@@ -54,8 +87,8 @@
   border: 2px solid #e5e7eb;
   border-radius: 6px;
   padding: 0;
-  width: 44px;
-  height: 56px;
+  width: 52px;
+  height: 68px;
   overflow: hidden;
   cursor: pointer;
   flex-shrink: 0;
@@ -77,12 +110,52 @@
   border-color: #4f46e5;
 }
 
+.patternThumbs {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.patternThumb {
+  appearance: none;
+  background:
+    linear-gradient(45deg, #eef0f3 25%, transparent 25%),
+    linear-gradient(-45deg, #eef0f3 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #eef0f3 75%),
+    linear-gradient(-45deg, transparent 75%, #eef0f3 75%),
+    #ffffff;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
+  border: 2px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 4px;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.12s;
+}
+
+.patternThumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.patternThumb:hover {
+  border-color: #9ca3af;
+}
+
 .controls {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-left: auto;
   flex-wrap: wrap;
+  padding-top: 2px;
 }
 
 .range {
@@ -134,6 +207,7 @@
 }
 
 .canvasFrame {
+  position: relative;
   max-width: 100%;
   max-height: 100%;
   height: 100%;

@@ -3,19 +3,35 @@ import react from '@vitejs/plugin-react';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const MODELS_REL = 'public/models';
+const MODEL_DIRS = ['public/models', 'public/test-models'];
+const PATTERN_DIR = 'public/test-patterns';
 const PATTERN = /\.(png|jpe?g|webp)$/i;
+const PATTERN_ASSET = /\.(png|jpe?g|webp|svg)$/i;
 
-function scanModels(dir: string) {
+type AssetEntry = { url: string; mtime: number };
+
+function scanAssetDir(root: string, dir: string, matcher: RegExp): AssetEntry[] {
   if (!fs.existsSync(dir)) return [];
-  return fs
-    .readdirSync(dir)
-    .filter((f) => PATTERN.test(f))
-    .sort()
-    .map((f) => {
-      const stat = fs.statSync(path.join(dir, f));
-      return { url: `/models/${f}`, mtime: Math.floor(stat.mtimeMs) };
-    });
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    if (entry.name.startsWith('_')) return [];
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return scanAssetDir(root, full, matcher);
+    if (!matcher.test(entry.name)) return [];
+    const stat = fs.statSync(full);
+    const rel = path.relative(root, full).split(path.sep).join('/');
+    return [{ url: `/${rel}`, mtime: Math.floor(stat.mtimeMs) }];
+  });
+}
+
+function scanModels(root: string) {
+  return MODEL_DIRS
+    .flatMap((rel) => scanAssetDir(root, path.resolve(__dirname, rel), PATTERN))
+    .sort((a, b) => a.url.localeCompare(b.url));
+}
+
+function scanPatterns(root: string) {
+  return scanAssetDir(root, path.resolve(__dirname, PATTERN_DIR), PATTERN_ASSET)
+    .sort((a, b) => a.url.localeCompare(b.url));
 }
 
 // dev-only: serve a live listing of /public/models so adding/removing files
@@ -26,7 +42,7 @@ function modelsApiPlugin(): Plugin {
     name: 'mock-research-models-api',
     apply: 'serve',
     configureServer(server: ViteDevServer) {
-      const dir = path.resolve(__dirname, MODELS_REL);
+      const publicRoot = path.resolve(__dirname, 'public');
       // use() called synchronously here registers the middleware BEFORE
       // Vite's internal transformIndexHtml + spa-fallback. Returning a
       // function would register AFTER, and the html fallback would win.
@@ -35,7 +51,7 @@ function modelsApiPlugin(): Plugin {
           try {
             res.setHeader('Content-Type', 'application/json');
             res.setHeader('Cache-Control', 'no-store');
-            res.end(JSON.stringify(scanModels(dir)));
+            res.end(JSON.stringify(scanModels(publicRoot)));
           } catch (e) {
             res.statusCode = 500;
             res.end(JSON.stringify({ error: String(e) }));
@@ -44,7 +60,8 @@ function modelsApiPlugin(): Plugin {
         }
         next();
       });
-      if (fs.existsSync(dir)) {
+      const watchDirs = MODEL_DIRS.map((rel) => path.resolve(__dirname, rel)).filter((dir) => fs.existsSync(dir));
+      for (const dir of watchDirs) {
         // fs.watch fires for create/delete/rename; debounce a touch so
         // batched filesystem ops broadcast once.
         let pending: NodeJS.Timeout | null = null;
@@ -65,7 +82,10 @@ export default defineConfig({
   define: {
     // Build-time snapshot — used by production bundles (no dev API there).
     __MODELS__: JSON.stringify(
-      scanModels(path.resolve(__dirname, MODELS_REL))
+      scanModels(path.resolve(__dirname, 'public'))
+    ),
+    __PATTERNS__: JSON.stringify(
+      scanPatterns(path.resolve(__dirname, 'public'))
     ),
   },
 });

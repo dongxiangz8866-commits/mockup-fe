@@ -82,14 +82,32 @@ export async function estimateDepth(photo: HTMLImageElement): Promise<HTMLCanvas
   }
   tctx.putImageData(td, 0, 0);
 
-  // Upscale (bilinear) to photo native size. Sobel later runs at this res so
-  // depth gradient resolution matches the displace shader's photo-uv sampling.
+  // Two-step: blur at the DAv2 native resolution first (small canvas, cheap
+  // kernel, predictable Skia behavior for large blur radii), THEN upscale to
+  // photo size. The displace shader's radial wrap reads
+  //   drop = (zCenter - zHere) / zCenter
+  // per fragment and multiplies it into the warp offset, so any local depth
+  // variation (clothing folds, hair shadows, the print already on the shirt,
+  // jewelry) bends adjacent pixels of the pattern by different amounts and
+  // turns straight horizontal lines into waves. We want only the smooth
+  // front-to-side body-cylinder slope to survive — everything else has to
+  // go. A native-resolution kernel of w0/12 ≈ 43 px on a 518² depth = a
+  // 12-pixel feature wipe, well above the scale of clothing noise.
+  const blurred = document.createElement('canvas');
+  blurred.width = w0;
+  blurred.height = h0;
+  const bctx = blurred.getContext('2d')!;
+  const blurPxNative = Math.max(8, Math.round(w0 / 12));
+  bctx.filter = `blur(${blurPxNative}px)`;
+  bctx.drawImage(tmp, 0, 0);
+  console.log('[depth] blurred at native', w0, 'x', h0, 'with', blurPxNative, 'px → upscaling to', photo.naturalWidth, 'x', photo.naturalHeight);
+
   const out = document.createElement('canvas');
   out.width = photo.naturalWidth;
   out.height = photo.naturalHeight;
   const octx = out.getContext('2d')!;
   octx.imageSmoothingEnabled = true;
   octx.imageSmoothingQuality = 'high';
-  octx.drawImage(tmp, 0, 0, out.width, out.height);
+  octx.drawImage(blurred, 0, 0, out.width, out.height);
   return out;
 }

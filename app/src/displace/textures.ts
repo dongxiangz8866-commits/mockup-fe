@@ -41,9 +41,16 @@ export function canvasToTexture(canvas: HTMLCanvasElement): THREE.Texture {
   const t = new THREE.CanvasTexture(canvas);
   t.colorSpace = THREE.NoColorSpace;
   t.flipY = false;
-  t.minFilter = THREE.LinearFilter;
+  // Trilinear mipmapping: pattern is often sampled at <1:1 (a 2K artwork
+  // rendered into a 300 px wide print region). Without mipmaps, each output
+  // pixel reads 4 random texels → visible jaggies & shimmer inside the
+  // print. WebGL2 (r3f default) handles NPOT mipmaps natively. Anisotropy
+  // smooths the foreshortened pattern when the quad is rotated relative to
+  // the camera (tilted shoulders, side-shot poses).
+  t.minFilter = THREE.LinearMipmapLinearFilter;
   t.magFilter = THREE.LinearFilter;
-  t.generateMipmaps = false;
+  t.generateMipmaps = true;
+  t.anisotropy = 8;
   t.wrapS = THREE.ClampToEdgeWrapping;
   t.wrapT = THREE.ClampToEdgeWrapping;
   t.needsUpdate = true;

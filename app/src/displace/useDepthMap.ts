@@ -2,7 +2,20 @@ import { useEffect, useState } from 'react';
 import { decodeCachedMap, loadCachedMap, saveCachedMap } from '../shading';
 import { estimateDepth } from './depthPipeline';
 
-const DEPTH_CACHE_PREFIX = 'depth-cache:v1:';
+const DEPTH_CACHE_PREFIX = 'depth-cache:v3:';
+
+// Drop any leftover entries from prior unblurred revisions so they don't
+// silently consume localStorage quota forever. Runs once on module load.
+try {
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const k = localStorage.key(i);
+    if (k && (k.startsWith('depth-cache:v1:') || k.startsWith('depth-cache:v2:'))) {
+      localStorage.removeItem(k);
+    }
+  }
+} catch {
+  // private mode etc. — quota errors are non-fatal
+}
 
 // Live HTMLCanvasElement keyed by src — keeps the depth map ready instantly
 // on photo re-select within the same session.

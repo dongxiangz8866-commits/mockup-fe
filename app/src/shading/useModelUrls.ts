@@ -35,3 +35,7 @@ export function useModelUrls(): string[] {
   }, []);
   return urls;
 }
+
+export function usePatternUrls(): string[] {
+  return toUrls(__PATTERNS__);
+}

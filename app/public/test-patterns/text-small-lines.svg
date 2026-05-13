@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <rect width="1200" height="1200" fill="none"/>
+  <text x="600" y="300" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="118" font-weight="800" fill="#111111">TYPE TEST</text>
+  <text x="600" y="430" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="54" font-weight="700" fill="#111111">SMALL TEXT READABILITY</text>
+  <text x="600" y="520" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="38" font-weight="500" fill="#111111">ABCDEFGHIJKLMNOPQRSTUVWXYZ</text>
+  <text x="600" y="590" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="38" font-weight="500" fill="#111111">0123456789 / THIN STROKES / EDGE QUALITY</text>
+  <text x="600" y="690" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="500" fill="#111111">This pattern checks whether fabric folds and scaling destroy fine text.</text>
+  <path d="M260 780H940M260 840H940M260 900H940" stroke="#111111" stroke-width="10" stroke-linecap="round"/>
+</svg>

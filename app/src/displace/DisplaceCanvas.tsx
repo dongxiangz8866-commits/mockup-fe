@@ -17,6 +17,7 @@ type Props = {
   photoTex: THREE.Texture;
   patternTex: THREE.Texture;
   displaceTex: THREE.Texture;
+  wrinkleDisplaceTex: THREE.Texture;
   lightTex: THREE.Texture;
   shadingTex: THREE.Texture;
   photoSize: { w: number; h: number };
@@ -24,7 +25,9 @@ type Props = {
   strength: number;
   dispSign: number;
   depthWrap: number;
+  wrinkleStrength: number;
   zCenter: number;
+  zRange: number;
   printCenterUV: [number, number];
   envRGB: [number, number, number];
   garmentRGB: [number, number, number];
@@ -46,10 +49,20 @@ export default function DisplaceCanvas(p: Props) {
     uniforms.uPhoto.value = p.photoTex;
     uniforms.uPattern.value = p.patternTex;
     uniforms.uDisplace.value = p.displaceTex;
+    uniforms.uWrinkleDisplace.value = p.wrinkleDisplaceTex;
     uniforms.uLight.value = p.lightTex;
     uniforms.uShading.value = p.shadingTex;
     uniforms.uHairMask.value = p.hairTex;
-  }, [uniforms, p.photoTex, p.patternTex, p.displaceTex, p.lightTex, p.shadingTex, p.hairTex]);
+  }, [
+    uniforms,
+    p.photoTex,
+    p.patternTex,
+    p.displaceTex,
+    p.wrinkleDisplaceTex,
+    p.lightTex,
+    p.shadingTex,
+    p.hairTex,
+  ]);
 
   useEffect(() => {
     uniforms.uPhotoSize.value.set(p.photoSize.w, p.photoSize.h);
@@ -76,12 +89,20 @@ export default function DisplaceCanvas(p: Props) {
   }, [uniforms, p.depthWrap]);
 
   useEffect(() => {
+    uniforms.uWrinkleStrength.value = p.wrinkleStrength;
+  }, [uniforms, p.wrinkleStrength]);
+
+  useEffect(() => {
     uniforms.uPrintCenterUV.value.set(p.printCenterUV[0], p.printCenterUV[1]);
   }, [uniforms, p.printCenterUV]);
 
   useEffect(() => {
     uniforms.uZCenter.value = p.zCenter;
   }, [uniforms, p.zCenter]);
+
+  useEffect(() => {
+    uniforms.uZRange.value = p.zRange;
+  }, [uniforms, p.zRange]);
 
   useEffect(() => {
     uniforms.uEnvRGB.value.set(p.envRGB[0], p.envRGB[1], p.envRGB[2]);
