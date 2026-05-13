@@ -77,7 +77,6 @@ export const frag = /* glsl */ `
     // dispCol always sampled so the 'displace' debug view keeps working
     // regardless of which path is active (Sobel vs depth radial warp).
     vec4 dispCol = texture2D(uDisplace, puv);
-    vec4 wrinkleCol = texture2D(uWrinkleDisplace, puv);
 
     vec2 puvWarped;
     if (uDepthWrap > 0.0) {
@@ -94,24 +93,18 @@ export const frag = /* glsl */ `
       // pattern from FURTHER OUT in source → pattern compresses at body edges
       // = cylinder wrap appearance, driven by actual depth not by a fixed
       // angle slider.
+      //
+      // 2026-05-13: 回滚到 914676e 的原始公式。48a3d05 把这里改成
+      //   drop = smoothstep(0.04, 1.0, abs(zC-z)/uZRange) 并加 DEPTH_WRAP_GAIN=0.10
+      // 想"normalize 不同照片的深度对比"，副作用是 ① 0.04 阈值把弱深度变化整体抹平
+      // ② 0.10 增益把整体 wrap 砍到 1/10。结果模型贴合感几乎消失（A/B 对比 914676e
+      // 确认）。同期加的 wrinkle 位移项也一并去掉——那个用 photo-DoG/Sobel 作 UV
+      // 抖动，和 depth-driven 的 "贴合"目标不同源。uWrinkleDisplace / uWrinkleStrength
+      // / uZRange uniforms 保留为 dead code，未来要再启用可以单独开。
       float zHere = dispCol.r;
-      // DAv2 contrast varies heavily by photo. In many front-facing shirt
-      // images the center-to-side depth delta is only 2–5% of the byte range,
-      // so the old center-relative formula makes the slider feel inert. Normalize
-      // by the local print-quad range and use abs() so the wrap still works
-      // when a model/backend emits the near/far convention inverted.
-      float drop = abs(uZCenter - zHere) / max(uZRange, 0.01);
-      drop = smoothstep(0.04, 1.0, clamp(drop, 0.0, 1.0));
+      float drop = clamp((uZCenter - zHere) / max(uZCenter, 0.01), 0.0, 1.0);
       vec2 fromCenter = puv - uPrintCenterUV;
-      puvWarped = uPrintCenterUV + fromCenter * (1.0 + drop * uDepthWrap * DEPTH_WRAP_GAIN * uStrength * uDispSign);
-
-      // Fine wrinkle displacement. The ML depth map is intentionally blurred
-      // to describe body curvature, so it cannot carry fabric creases. Use
-      // the photo-derived DoG/Sobel wrinkle field as a second depth-detail
-      // layer: macro depth bends the print around the torso, this local field
-      // sinks/raises it along cloth folds.
-      vec2 wrinkle = (wrinkleCol.rg - vec2(0.5)) * 2.0;
-      puvWarped += wrinkle * WRINKLE_AMP_PX * uWrinkleStrength * uDispSign / uPhotoSize;
+      puvWarped = uPrintCenterUV + fromCenter * (1.0 + drop * uDepthWrap * uStrength * uDispSign);
     } else {
       // Original Sobel-of-DoG path.
       vec2 disp = (dispCol.rg - vec2(0.5)) * 2.0;     // [-1, 1]
