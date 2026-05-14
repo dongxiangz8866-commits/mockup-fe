@@ -34,6 +34,12 @@ export function useQuadDrag(
     (e: ReactPointerEvent<HTMLDivElement>) => {
       const start = startRef.current;
       if (!start || !photoSize) return;
+      // Self-heal: pointerup occasionally gets swallowed (Cmd+C, system
+      // overlays). If no button is down, treat this move as end-of-drag.
+      if (e.buttons === 0) {
+        startRef.current = null;
+        return;
+      }
       const rect = e.currentTarget.getBoundingClientRect();
       if (rect.width <= 0) return;
       const k = photoSize.w / rect.width;

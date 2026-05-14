@@ -21,7 +21,7 @@ function getLandmarker(): Promise<PoseLandmarker> {
     return PoseLandmarker.createFromOptions(vision, {
       baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
       runningMode: 'IMAGE',
-      numPoses: 1,
+      numPoses: 4,
     });
   })();
   p.catch(() => {
@@ -37,10 +37,10 @@ export async function detectPose(
   const lm = await getLandmarker();
   const result = lm.detect(img);
   if (!result.landmarks || result.landmarks.length === 0) return null;
-  return result.landmarks[0] as PoseLandmark[];
+  return selectPrimaryPose(result.landmarks as PoseLandmark[][], img);
 }
 
-const POSE_CACHE_PREFIX = 'pose-cache:v1:';
+const POSE_CACHE_PREFIX = 'pose-cache:v2:';
 
 export function readCachedPose(key: string): PoseLandmark[] | null {
   try {
@@ -86,8 +86,51 @@ export async function detectPoseCached(
 }
 
 export const POSE_INDEX = {
+  nose: 0,
   leftShoulder: 11,
   rightShoulder: 12,
   leftHip: 23,
   rightHip: 24,
 } as const;
+
+function visibility(lm: PoseLandmark | undefined): number {
+  return lm?.visibility ?? 1;
+}
+
+function mid(a: PoseLandmark, b: PoseLandmark) {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+  };
+}
+
+function poseScore(lm: PoseLandmark[], img: HTMLImageElement): number {
+  const ls = lm[POSE_INDEX.leftShoulder];
+  const rs = lm[POSE_INDEX.rightShoulder];
+  if (!ls || !rs) return -Infinity;
+  const shoulderVis = Math.min(visibility(ls), visibility(rs));
+  if (shoulderVis < 0.35) return -Infinity;
+
+  const shoulderLen = Math.hypot((ls.x - rs.x) * img.naturalWidth, (ls.y - rs.y) * img.naturalHeight);
+  const shoulderMid = mid(ls, rs);
+  const lh = lm[POSE_INDEX.leftHip];
+  const rh = lm[POSE_INDEX.rightHip];
+  const hipVis = Math.min(visibility(lh), visibility(rh));
+  const hipMid = lh && rh && hipVis > 0.25 ? mid(lh, rh) : null;
+  const torsoLen = hipMid
+    ? Math.hypot((hipMid.x - shoulderMid.x) * img.naturalWidth, (hipMid.y - shoulderMid.y) * img.naturalHeight)
+    : shoulderLen;
+
+  // Foreground fashion subjects tend to have larger shoulder spans and sit
+  // lower in the frame. This prevents a back/right person from winning just
+  // because the detector returned them first.
+  const scaleScore = shoulderLen * (torsoLen + shoulderLen * 0.5);
+  const foregroundBoost = 0.75 + shoulderMid.y * 0.75;
+  return scaleScore * foregroundBoost * shoulderVis;
+}
+
+function selectPrimaryPose(poses: PoseLandmark[][], img: HTMLImageElement): PoseLandmark[] {
+  return poses.reduce((best, pose) => (
+    poseScore(pose, img) > poseScore(best, img) ? pose : best
+  ), poses[0]);
+}

@@ -60,13 +60,14 @@ export const vert = /* glsl */ `
 
   // Matches fragment-side constants (see frag block above main).
   const float DOG_AMP_PX = 10.0;
-  // Halved 2026-05-14 from 20/60 → 10/25. After the per-image p10/p90
-  // normalization, signals on high-contrast outdoor photos (green tee +
-  // leaves) cleanly drive the warp to its full amplitude, and 20/60 was
-  // pushing pattern UVs OUT OF the quad on the bottom edge — visible as
-  // BUY-row letters bent into V shapes outside the print area. 10/25
-  // still gives perceptible "cloth feel" warp on real folds without
-  // breaking the print outline.
+  // 2026-05-14: halved 20→10 together with FOLD_GRAD 60→25 to stop the
+  // V-shape bend on high-contrast outdoor photos. Per-garment dark-boost
+  // is applied on the JS side now — DisplacePage multiplies the slider
+  // value by a luminance-based factor (~1.7× on black, ~0.7× on white)
+  // before passing as uWrinkleStrength. Keep this constant at 10 — the
+  // safe baseline for colored / light shirts. Anything higher and the
+  // FOLD_GRAD-scaled-together-with-SHADING_DROP pair start bending the
+  // pattern outline on cleanly-shaded non-dark photos.
   const float SHADING_DROP_AMP_PX = 10.0;
   const float SHADING_DROP_NOISE = 0.05;
   const float SHADING_DROP_FLOOR = 0.20;

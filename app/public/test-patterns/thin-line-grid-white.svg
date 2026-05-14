@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <rect width="1200" height="1200" fill="none"/>
+  <g stroke="#ffffff" stroke-width="8" fill="none">
+    <rect x="260" y="220" width="680" height="760" rx="30"/>
+    <path d="M260 410H940M260 600H940M260 790H940M430 220V980M600 220V980M770 220V980"/>
+    <circle cx="430" cy="410" r="55"/>
+    <circle cx="770" cy="790" r="55"/>
+    <path d="M510 705L600 520L690 705Z"/>
+  </g>
+  <text x="600" y="1080" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="50" font-weight="800" fill="#ffffff">LINE EDGE TEST</text>
+</svg>

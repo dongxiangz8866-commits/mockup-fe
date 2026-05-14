@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { detectPoseCached, type PoseLandmark } from '../poseDetector';
 import {
+  classifyShirt,
   quadFromLandmarks,
   sampleGarment,
   sampleScene,
@@ -34,6 +35,23 @@ const garmentMemCache = new Map<string, GarmentSample>();
 // Same rationale as garmentMemCache: env color is a SCENE property and does
 // not change as the user drags the print around. Keyed by photoSrc only.
 const sceneMemCache = new Map<string, SceneSample>();
+
+function autoLightStrength(garment: GarmentSample): number {
+  const [r, g, b] = garment.rgb;
+  const maxRGB = Math.max(r, g, b);
+  const minRGB = Math.min(r, g, b);
+  const sat = maxRGB > 0 ? (maxRGB - minRGB) / maxRGB : 0;
+  const key = classifyShirt(garment);
+  if (key === 'white') return 1.35;
+  if (key === 'black') return 0.45;
+
+  // Saturated shirts have low luminance in BT.601 even when visually bright
+  // (red is the obvious case). Keep their multiply-light contribution weak
+  // so shadows shape the print without crushing the artwork.
+  const vivid = Math.max(0, Math.min(1, (sat - 0.20) / 0.45));
+  const brightColor = Math.max(0, Math.min(1, (maxRGB - 100) / 120));
+  return 0.45 + (0.18 - 0.45) * vivid * brightColor;
+}
 
 export default function DisplacePage() {
   const [photoSrc, setPhotoSrc] = useState<string | null>(null);
@@ -281,24 +299,37 @@ export default function DisplacePage() {
     [garment]
   );
 
-  // Auto-tune lightStrength AND sceneBrightness from the OVERLAP — the shirt
-  // color sampled inside the print quad. The earlier pattern-image-brightness
-  // detour was the wrong layer: what matters for shadow modulation is what
-  // SUBSTRATE the pattern is being printed on, not the artwork itself.
-  //   • black shirt under print → lightStrength 0.5, sceneBrightness 0.8
-  //   • white shirt under print → lightStrength 1.5, sceneBrightness 1.0
-  //   • mixed shirt (e.g. half black / half white) → garment strip-sample
-  //     averages it, auto value lands in between — exactly where a viewer
-  //     would expect a print straddling both halves to sit.
+  // Wrinkle-amplitude multiplier by garment darkness. Black tees read flatter
+  // (lower DoG contrast even after A1 stretch and p10/p90 norm) so the same
+  // SHADING_DROP_AMP_PX visually under-conforms on dark while over-warping on
+  // light. Switched the metric from luminance to max(R,G,B): perceived
+  // darkness, not BT.601 luminance. A royal-blue tee has meanLum≈85 (treated
+  // as "dark" with 0.114 blue weight) but max(R,G,B)≈200 — the cloth shows
+  // folds just fine and doesn't need a boost. max isolates *true* dark
+  // (black / charcoal / navy: max < 80) from saturated mid-tones.
+  const wrinkleDarkBoost = useMemo(() => {
+    if (!garment) return 1.0;
+    const maxRGB = Math.max(garment.rgb[0], garment.rgb[1], garment.rgb[2]);
+    // Tighter breakpoint: anything with max ≥ 180 lands at the floor.
+    // Royal-blue (max≈200) was still bending bottom bar at 0.64×; need
+    // to crush it down to 0.4× to keep FOLD_GRAD under the V-bend
+    // threshold. Navy / charcoal (max 60–90) still get a meaningful
+    // boost via the steeper slope.
+    const t = Math.max(0, Math.min(1, (maxRGB - 40) / 140));
+    return 1.7 + t * (0.4 - 1.7); // 1.7 on true black → 0.4 on light/saturated
+  }, [garment]);
+
+  // Auto-tune lightStrength from the OVERLAP. White garments can take strong
+  // multiply shadows; saturated red/blue/green garments need much weaker
+  // default light because luminance underestimates their perceived brightness
+  // and otherwise crushes the artwork.
   useEffect(() => {
     if (!garment) return;
     const meanLum = garment.rgb[0] * 0.299 + garment.rgb[1] * 0.587 + garment.rgb[2] * 0.114;
-    const t = Math.max(0, Math.min(1, (meanLum - 50) / 170));
-    const ls = 0.5 + t * 1.0;
-    const sb = 0.8 + t * 0.2;
-    console.log(`[overlap] garmentMeanLum=${meanLum.toFixed(0)} t=${t.toFixed(2)} → lightStrength=${ls.toFixed(2)} sceneBrightness=${sb.toFixed(2)}`);
+    const ls = autoLightStrength(garment);
+    const maxRGB = Math.max(garment.rgb[0], garment.rgb[1], garment.rgb[2]);
+    console.log(`[overlap] garmentMeanLum=${meanLum.toFixed(0)} maxRGB=${maxRGB.toFixed(0)} → lightStrength=${ls.toFixed(2)}`);
     setLightStrength(ls);
-    setSceneBrightness(sb);
   }, [garment]);
 
   // Debug: log env signal so we can tell whether 色彩融合 is gated off
@@ -441,7 +472,7 @@ export default function DisplacePage() {
               strength={strength}
               dispSign={1}
               depthWrap={depthWrap}
-              wrinkleStrength={shadingTex ? wrinkleDepthStrength * shadingStats.autoScale : 0}
+              wrinkleStrength={shadingTex ? wrinkleDepthStrength * shadingStats.autoScale * wrinkleDarkBoost : 0}
               shadingP10={shadingStats.p10}
               shadingP90={shadingStats.p90}
               zCenter={depthStats.center}

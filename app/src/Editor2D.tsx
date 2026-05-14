@@ -345,6 +345,13 @@ export default function Editor2D() {
     (e: React.PointerEvent) => {
       const m = dragRef.current;
       if (!m || !stageRef.current) return;
+      // Self-heal: if no button is held but dragRef survived, a prior pointerup
+      // was eaten (e.g. Cmd+C interrupting the event stream on macOS). End drag.
+      if (e.buttons === 0) {
+        dragRef.current = null;
+        setSnap({ v: false, h: false });
+        return;
+      }
       const xf = computeTransform();
       const rect = stageRef.current.getBoundingClientRect();
       const px = e.clientX - rect.left;
