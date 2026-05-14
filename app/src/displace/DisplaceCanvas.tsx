@@ -28,6 +28,8 @@ type Props = {
   dispSign: number;
   depthWrap: number;
   wrinkleStrength: number;
+  shadingP10: number;
+  shadingP90: number;
   zCenter: number;
   zRange: number;
   printCenterUV: [number, number];
@@ -93,6 +95,11 @@ export default function DisplaceCanvas(p: Props) {
   useEffect(() => {
     uniforms.uWrinkleStrength.value = p.wrinkleStrength;
   }, [uniforms, p.wrinkleStrength]);
+
+  useEffect(() => {
+    uniforms.uShadingP10.value = p.shadingP10;
+    uniforms.uShadingP90.value = p.shadingP90;
+  }, [uniforms, p.shadingP10, p.shadingP90]);
 
   useEffect(() => {
     uniforms.uPrintCenterUV.value.set(p.printCenterUV[0], p.printCenterUV[1]);

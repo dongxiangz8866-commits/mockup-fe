@@ -50,10 +50,24 @@ export const vert = /* glsl */ `
   uniform float uZCenter;
   uniform vec3  uGarmentRGB;
   uniform vec2  uPhotoSize;
+  // Per-image shading percentiles measured inside the pose quad on the CPU
+  // (sampleShadingStats). Used to remap each shading sample into a stable
+  // [0..1] range so the wrinkle slider has consistent meaning across photos
+  // with different DoG contrast (outdoor vs studio, dark vs light shirts).
+  // p10 ≈ "deep fold" reference, p90 ≈ "flat cloth" reference.
+  uniform float uShadingP10;
+  uniform float uShadingP90;
 
   // Matches fragment-side constants (see frag block above main).
   const float DOG_AMP_PX = 10.0;
-  const float SHADING_DROP_AMP_PX = 20.0;
+  // Halved 2026-05-14 from 20/60 → 10/25. After the per-image p10/p90
+  // normalization, signals on high-contrast outdoor photos (green tee +
+  // leaves) cleanly drive the warp to its full amplitude, and 20/60 was
+  // pushing pattern UVs OUT OF the quad on the bottom edge — visible as
+  // BUY-row letters bent into V shapes outside the print area. 10/25
+  // still gives perceptible "cloth feel" warp on real folds without
+  // breaking the print outline.
+  const float SHADING_DROP_AMP_PX = 10.0;
   const float SHADING_DROP_NOISE = 0.05;
   const float SHADING_DROP_FLOOR = 0.20;
 
@@ -68,7 +82,7 @@ export const vert = /* glsl */ `
   // 60 lands ~9 px push per slider unit on typical 0.15 gradient
   // magnitude — comparable to radial push, complementary direction.
   const float FOLD_GRAD_TAP = 15.0;
-  const float FOLD_GRAD_AMP_PX = 60.0;
+  const float FOLD_GRAD_AMP_PX = 25.0;
 
   void main() {
     vec2 puv = vec2(uv.x, 1.0 - uv.y);
@@ -93,8 +107,17 @@ export const vert = /* glsl */ `
       // 9-tap that the per-fragment version had to add). Cloth-chromaticity
       // gate stays — keeps dye-mask in chroma terms so V-neck skin and hair
       // don't drive the warp.
+      //
+      // sNorm remaps raw shading into [0..1] using this photo's quad-ROI
+      // percentiles (p10 = deep-fold reference, p90 = flat-cloth reference).
+      // Without this, a flat-light studio shot with weak DoG signal would
+      // need slider=3 to warp at all, while an outdoor shot with strong DoG
+      // signal would over-warp at slider=0.5. After remap, both photos sit
+      // in the same [0..1] band and the slider is the only knob.
+      float invSpread = 1.0 / max(uShadingP90 - uShadingP10, 0.01);
       float sHere = texture2D(uShading, puv).r;
-      float shadingDrop = clamp((0.5 - sHere) * 2.0, 0.0, 1.0);
+      float sNormHere = clamp((sHere - uShadingP10) * invSpread, 0.0, 1.0);
+      float shadingDrop = 1.0 - sNormHere;
       vec4 fpHere = texture2D(uPhoto, puv);
       float fpMax = max(max(fpHere.r, fpHere.g), max(fpHere.b, 1.0/255.0));
       vec3 fpChroma = fpHere.rgb / fpMax;
@@ -114,10 +137,12 @@ export const vert = /* glsl */ `
       // chest fold, vertically. Direction-coherence is preserved by mesh
       // interpolation — see FOLD_GRAD_TAP / FOLD_GRAD_AMP_PX block.
       vec2 fdTx = vec2(FOLD_GRAD_TAP) / uPhotoSize;
-      float sLg = texture2D(uShading, puv + vec2(-fdTx.x, 0.0)).r;
-      float sRg = texture2D(uShading, puv + vec2( fdTx.x, 0.0)).r;
-      float sUg = texture2D(uShading, puv + vec2(0.0, -fdTx.y)).r;
-      float sDg = texture2D(uShading, puv + vec2(0.0,  fdTx.y)).r;
+      // Normalize each tap through the same p10/p90 remap as sHere so the
+      // gradient magnitude is also stable across photos.
+      float sLg = clamp((texture2D(uShading, puv + vec2(-fdTx.x, 0.0)).r - uShadingP10) * invSpread, 0.0, 1.0);
+      float sRg = clamp((texture2D(uShading, puv + vec2( fdTx.x, 0.0)).r - uShadingP10) * invSpread, 0.0, 1.0);
+      float sUg = clamp((texture2D(uShading, puv + vec2(0.0, -fdTx.y)).r - uShadingP10) * invSpread, 0.0, 1.0);
+      float sDg = clamp((texture2D(uShading, puv + vec2(0.0,  fdTx.y)).r - uShadingP10) * invSpread, 0.0, 1.0);
       vec2 foldGrad = vec2(sRg - sLg, sDg - sUg) * clothMaskFold;
       puvWarped += foldGrad * FOLD_GRAD_AMP_PX * uWrinkleStrength * uStrength * uDispSign / uPhotoSize;
     } else {
@@ -259,6 +284,8 @@ export type DisplaceUniforms = {
   uDispSign: { value: number };
   uDepthWrap: { value: number };
   uWrinkleStrength: { value: number };
+  uShadingP10: { value: number };
+  uShadingP90: { value: number };
   uPrintCenterUV: { value: THREE.Vector2 };
   uZCenter: { value: number };
   uZRange: { value: number };
@@ -290,6 +317,8 @@ export function makeUniforms(): DisplaceUniforms {
     uDispSign: { value: 1.0 },
     uDepthWrap: { value: 0.0 },
     uWrinkleStrength: { value: 1.0 },
+    uShadingP10: { value: 0.35 },
+    uShadingP90: { value: 0.50 },
     uPrintCenterUV: { value: new THREE.Vector2(0.5, 0.5) },
     uZCenter: { value: 0.5 },
     uZRange: { value: 0.08 },

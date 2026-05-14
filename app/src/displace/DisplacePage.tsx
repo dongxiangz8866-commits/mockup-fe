@@ -15,6 +15,7 @@ import PatternPicker from './PatternPicker';
 import PhotoPicker from './PhotoPicker';
 import QuadHandles from './QuadHandles';
 import { sampleDepthStats } from './depthStats';
+import { sampleShadingStats } from './shadingStats';
 import { dataCanvasToTexture, loadImage } from './textures';
 import { useDepthMap } from './useDepthMap';
 import { useDisplaceTextures } from './useDisplaceTextures';
@@ -53,7 +54,7 @@ export default function DisplacePage() {
   const lift = 0.0;
   const tint = 0.5;
   const strength = 1.0;
-  const [depthWrapStrength, setDepthWrapStrength] = useState(5.0);
+  const [depthWrapStrength, setDepthWrapStrength] = useState(2.0);
   const [debug, setDebugMode] = useState<DebugMode>('composite');
   // Default 1.0 — restored after the mesh-warp refactor (2026-05-13) moved
   // the fold push from per-fragment to per-vertex sampling. The artefacts
@@ -229,6 +230,17 @@ export default function DisplacePage() {
   const depthStats = useMemo(
     () => (depthResult.depth ? sampleDepthStats(depthResult.depth, scaledQuad) : { center: 0.5, range: 0.08 }),
     [depthResult.depth, scaledQuad]
+  );
+
+  // Per-image shading percentiles inside the pose quad. Drives slider
+  // normalization — the wrinkle slider previously meant "DoG contrast
+  // multiplier", which varies wildly across photos. After this remap it
+  // means "fold strength fraction", consistent per-image. Keyed by `quad`
+  // (shirt ROI) not `scaledQuad` — shading distribution is a property of
+  // the SHIRT, independent of where the print sits inside it.
+  const shadingStats = useMemo(
+    () => (maps?.shading ? sampleShadingStats(maps.shading, quad) : { p10: 0.35, p90: 0.50, autoScale: 1.0 }),
+    [maps, quad]
   );
 
   // Sample garment color ONCE per src — see garmentMemCache comment above
@@ -429,7 +441,9 @@ export default function DisplacePage() {
               strength={strength}
               dispSign={1}
               depthWrap={depthWrap}
-              wrinkleStrength={shadingTex ? wrinkleDepthStrength : 0}
+              wrinkleStrength={shadingTex ? wrinkleDepthStrength * shadingStats.autoScale : 0}
+              shadingP10={shadingStats.p10}
+              shadingP90={shadingStats.p90}
               zCenter={depthStats.center}
               zRange={depthStats.range}
               printCenterUV={printCenterUV}

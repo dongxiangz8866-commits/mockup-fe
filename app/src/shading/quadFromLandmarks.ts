@@ -10,10 +10,14 @@ const PRINT_W_FRAC = PRINT_W_UV / SHOULDER_SPAN_OF_CLOTH_W;
 
 // Distance from midshoulder to print top, measured along the body
 // vertical (perpendicular to the shoulder line) in fractions of
-// shoulderLen. 0.35 lands the top of the print at upper chest just
-// below the collar — same vertical position the earlier spine-lerp
-// gave with PRINT_TOP_T=0.20 on standing-upright bodies.
-const PRINT_DESCENT = 0.35;
+// shoulderLen. Iterated 0.35 → 0.22 → 0.10. MediaPipe Pose Lite places
+// shoulder landmarks on the trapezius (~10–15 px above the visual
+// shoulder edge), and that bias compounds with PRINT_DESCENT to drop
+// the print into upper abdomen on standing fashion shots. 0.10 puts
+// the print top at upper chest right below the collar, matching
+// catalog product photography. Severely-leaning poses needing manual
+// adjustment use whole-quad drag.
+const PRINT_DESCENT = 0.10;
 
 // Tilt-driven lateral offset gain — how much the print shifts in the
 // lean direction per unit tilt. Empirical scale: 1.0 means at 10° tilt
