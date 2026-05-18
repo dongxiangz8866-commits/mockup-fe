@@ -13,11 +13,17 @@
 // (it skips `_`-prefixed entries and non-image files) — e.g. test-models/
 // _rejected/ (~86MB of discarded shots) and the stale MANIFEST.json.
 
-import { rm, stat, readdir } from 'node:fs/promises';
+import { rm, stat, readdir, writeFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DIST = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+
+// Surge reads dist/CNAME for the deploy domain. vite wipes dist on every
+// build, so re-stamp it here (postbuild) — keeps `pnpm deploy:surge` a
+// single command that always lands on the same URL. Skipped under GitHub
+// Actions: there a CNAME file would mis-configure GitHub Pages.
+const SURGE_DOMAIN = 'yangji-mockup.surge.sh';
 const DROP = ['models', 'mock-models', 'sweatshirt.glb'];
 const PICKER_DIRS = ['test-models', 'test-patterns'];
 const SERVABLE = /\.(png|jpe?g|webp|svg)$/i;
@@ -72,6 +78,11 @@ for (const name of DROP) {
   console.log(`[trim-dist] removed dist/${name}`);
 }
 for (const d of PICKER_DIRS) await dropInside(d);
+if (!process.env.GITHUB_ACTIONS) {
+  await writeFile(resolve(DIST, 'CNAME'), SURGE_DOMAIN);
+  console.log(`[trim-dist] wrote dist/CNAME = ${SURGE_DOMAIN}`);
+}
+
 const after = await dirSize(DIST);
 const mb = (n) => (n / 1024 / 1024).toFixed(1);
 console.log(`[trim-dist] dist ${mb(before)}MB → ${mb(after)}MB`);

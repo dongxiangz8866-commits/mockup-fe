@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "postbuild": "node scripts/trim-dist.mjs",
+    "deploy:surge": "pnpm build && surge dist yangji-mockup.surge.sh",
     "preview": "vite preview",
     "screenshot": "node scripts/screenshot-thumbs.mjs",
     "screenshot:displace": "node scripts/screenshot-displace.mjs"
