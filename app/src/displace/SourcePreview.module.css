@@ -1,0 +1,67 @@
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 13px 14px;
+  background: #ffffff;
+  border: 1px solid #e9ebef;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+  letter-spacing: 0.02em;
+}
+
+.frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f3f4f6;
+  border: 1px solid #eef0f3;
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 96px;
+}
+
+/* Patterns are often transparent PNGs — checkerboard so the artwork
+   reads against it. Mirrors the pattern-thumb backdrop. */
+.checker {
+  background:
+    linear-gradient(45deg, #eef0f3 25%, transparent 25%),
+    linear-gradient(-45deg, #eef0f3 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #eef0f3 75%),
+    linear-gradient(-45deg, transparent 75%, #eef0f3 75%),
+    #ffffff;
+  background-position: 0 0, 0 9px, 9px -9px, -9px 0;
+  background-size: 18px 18px;
+}
+
+.img {
+  display: block;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.block:first-child .img {
+  max-height: 300px;
+}
+
+.block:last-child .img {
+  max-height: 190px;
+}
+
+.placeholder {
+  color: #9ca3af;
+  font-size: 12px;
+  padding: 28px 0;
+}

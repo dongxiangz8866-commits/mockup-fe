@@ -130,6 +130,45 @@
   box-shadow: 0 8px 28px rgba(16, 24, 40, 0.12);
 }
 
+/* Edit overlay reveals only on hover/drag so the clean composite is
+   visible the rest of the time. visibility:hidden (not just opacity:0)
+   so the corner handles can't be grabbed while the frame is invisible. */
+.handles {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.16s ease;
+}
+
+.handlesShown {
+  opacity: 1;
+  visibility: visible;
+}
+
+.editHint {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  padding: 3px 9px;
+  font-size: 11px;
+  color: #e5e7eb;
+  background: rgba(15, 17, 22, 0.55);
+  border-radius: 999px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.leftRail {
+  width: 264px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
 .rail {
   width: 320px;
   flex-shrink: 0;

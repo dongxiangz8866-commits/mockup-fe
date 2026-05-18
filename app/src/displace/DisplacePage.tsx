@@ -17,6 +17,7 @@ import PatternPicker from './PatternPicker';
 import PerfPanel from './PerfPanel';
 import PhotoPicker from './PhotoPicker';
 import QuadHandles from './QuadHandles';
+import SourcePreview from './SourcePreview';
 import { sampleDepthStats } from './depthStats';
 import { recordStage, resetParse } from './perfBus';
 import { sampleShadingStats } from './shadingStats';
@@ -60,6 +61,9 @@ function autoLightStrength(garment: GarmentSample): number {
 export default function DisplacePage() {
   const [photoSrc, setPhotoSrc] = useState<string | null>(null);
   const [patternSrc, setPatternSrc] = useState<string | null>(null);
+  // Edit handles reveal on hover/drag only — keeps the composite clean to
+  // judge the result, while still being one mouse-move away from editing.
+  const [hoverStage, setHoverStage] = useState(false);
 
   const [photo, setPhoto] = useState<HTMLImageElement | null>(null);
   const [patternImg, setPatternImg] = useState<HTMLImageElement | null>(null);
@@ -435,6 +439,10 @@ export default function DisplacePage() {
       </header>
 
       <div className={s.workspace}>
+        <aside className={s.leftRail}>
+          <SourcePreview photoSrc={photoSrc} patternSrc={patternSrc} />
+        </aside>
+
         <div className={s.stage}>
           {!photoSrc && <div className={s.empty}>选个模特图开始</div>}
           {photoSrc && !ready && failed && (
@@ -472,6 +480,8 @@ export default function DisplacePage() {
               onPointerMove={drag.onPointerMove}
               onPointerUp={drag.onPointerUp}
               onPointerCancel={drag.onPointerUp}
+              onPointerEnter={() => setHoverStage(true)}
+              onPointerLeave={() => setHoverStage(false)}
             >
               <DisplaceCanvas
                 photoTex={photoTex}
@@ -502,13 +512,22 @@ export default function DisplacePage() {
                 renderKey={`${photoSrc ?? ''}|${patternSrc ?? ''}`}
               />
               {quad && (
-                <QuadHandles
-                  quad={quad}
-                  scaledQuad={scaledQuad}
-                  photoSize={photoSize}
-                  scale={scale}
-                  setScale={setScale}
-                />
+                <div
+                  className={`${s.handles} ${
+                    hoverStage || drag.dragging ? s.handlesShown : ''
+                  }`}
+                >
+                  <QuadHandles
+                    quad={quad}
+                    scaledQuad={scaledQuad}
+                    photoSize={photoSize}
+                    scale={scale}
+                    setScale={setScale}
+                  />
+                </div>
+              )}
+              {quad && !hoverStage && !drag.dragging && (
+                <div className={s.editHint}>悬停可编辑印图</div>
               )}
             </div>
           )}

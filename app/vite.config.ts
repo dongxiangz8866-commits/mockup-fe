@@ -36,24 +36,30 @@ function scanPatterns(root: string) {
     .sort((a, b) => a.url.localeCompare(b.url));
 }
 
-// dev-only: serve a live listing of /public/models so adding/removing files
-// reflects without restarting Vite (the build-time `define` snapshot is
-// frozen at config load and can't be re-evaluated by HMR).
-function modelsApiPlugin(): Plugin {
+// dev-only: serve a live listing of /public asset dirs so adding/removing
+// files reflects without restarting Vite (the build-time `define` snapshot
+// is frozen at config load and can't be re-evaluated by HMR). Models and
+// patterns get the SAME treatment — one feed each.
+function assetsApiPlugin(): Plugin {
   return {
-    name: 'mock-research-models-api',
+    name: 'mock-research-assets-api',
     apply: 'serve',
     configureServer(server: ViteDevServer) {
       const publicRoot = path.resolve(__dirname, 'public');
+      const feeds = [
+        { route: '/api/models', event: 'models-changed', dirs: MODEL_DIRS, scan: () => scanModels(publicRoot) },
+        { route: '/api/patterns', event: 'patterns-changed', dirs: [PATTERN_DIR], scan: () => scanPatterns(publicRoot) },
+      ];
       // use() called synchronously here registers the middleware BEFORE
       // Vite's internal transformIndexHtml + spa-fallback. Returning a
       // function would register AFTER, and the html fallback would win.
       server.middlewares.use((req, res, next) => {
-        if (req.url && req.url.startsWith('/api/models')) {
+        const feed = req.url ? feeds.find((f) => req.url!.startsWith(f.route)) : undefined;
+        if (feed) {
           try {
             res.setHeader('Content-Type', 'application/json');
             res.setHeader('Cache-Control', 'no-store');
-            res.end(JSON.stringify(scanModels(publicRoot)));
+            res.end(JSON.stringify(feed.scan()));
           } catch (e) {
             res.statusCode = 500;
             res.end(JSON.stringify({ error: String(e) }));
@@ -62,24 +68,28 @@ function modelsApiPlugin(): Plugin {
         }
         next();
       });
-      const watchDirs = MODEL_DIRS.map((rel) => path.resolve(__dirname, rel)).filter((dir) => fs.existsSync(dir));
-      for (const dir of watchDirs) {
-        // fs.watch fires for create/delete/rename; debounce a touch so
-        // batched filesystem ops broadcast once.
-        let pending: NodeJS.Timeout | null = null;
-        fs.watch(dir, { persistent: false }, () => {
-          if (pending) clearTimeout(pending);
-          pending = setTimeout(() => {
-            server.ws.send({ type: 'custom', event: 'models-changed' });
-          }, 80);
-        });
+      for (const feed of feeds) {
+        const watchDirs = feed.dirs
+          .map((rel) => path.resolve(__dirname, rel))
+          .filter((dir) => fs.existsSync(dir));
+        for (const dir of watchDirs) {
+          // fs.watch fires for create/delete/rename; debounce a touch so
+          // batched filesystem ops broadcast once.
+          let pending: NodeJS.Timeout | null = null;
+          fs.watch(dir, { persistent: false }, () => {
+            if (pending) clearTimeout(pending);
+            pending = setTimeout(() => {
+              server.ws.send({ type: 'custom', event: feed.event });
+            }, 80);
+          });
+        }
       }
     },
   };
 }
 
 export default defineConfig({
-  plugins: [react(), modelsApiPlugin()],
+  plugins: [react(), assetsApiPlugin()],
   server: { port: 5174, strictPort: true },
   define: {
     // Build-time snapshot — used by production bundles (no dev API there).
