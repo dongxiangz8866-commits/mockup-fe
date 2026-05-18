@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { decodeCachedMap, loadCachedMap, saveCachedMap } from '../shading';
 import { segmentHair } from './hairSegmenter';
+import { recordStage } from './perfBus';
 
 const HAIR_CACHE_PREFIX = 'hair-cache:v1:';
 
@@ -27,10 +28,12 @@ export function useHairMask(photo: HTMLImageElement | null, src: string | null):
       setState('idle');
       return;
     }
+    const tStart = performance.now();
     const memHit = hairMemCache.get(src);
     if (memHit) {
       setHair(memHit);
       setState('ready');
+      recordStage('hair', performance.now() - tStart, 'mem');
       return;
     }
     let cancelled = false;
@@ -43,6 +46,7 @@ export function useHairMask(photo: HTMLImageElement | null, src: string | null):
           hairMemCache.set(src, c);
           setHair(c);
           setState('ready');
+          recordStage('hair', performance.now() - tStart, 'localStorage');
           return;
         } catch (e) {
           console.warn('[hair] cached decode failed, re-inferring:', e);
@@ -58,6 +62,7 @@ export function useHairMask(photo: HTMLImageElement | null, src: string | null):
         saveCachedMap(HAIR_CACHE_PREFIX, src, c);
         setHair(c);
         setState('ready');
+        recordStage('hair', performance.now() - tStart, 'compute');
       } catch (e) {
         if (cancelled) return;
         console.error('[hair] segmentation failed:', e);

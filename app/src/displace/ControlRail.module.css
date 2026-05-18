@@ -1,0 +1,88 @@
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 13px 14px;
+  background: #ffffff;
+  border: 1px solid #e9ebef;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.groupTitle {
+  font-size: 12px;
+  font-weight: 700;
+  color: #111827;
+  letter-spacing: 0.01em;
+}
+
+.groupTitle:not(:first-child) {
+  margin-top: 9px;
+  padding-top: 11px;
+  border-top: 1px solid #f0f1f4;
+}
+
+.range {
+  display: grid;
+  grid-template-columns: 56px 1fr 40px;
+  align-items: center;
+  gap: 9px;
+  font-size: 11.5px;
+  color: #4b5563;
+}
+
+.rangeLabel {
+  white-space: nowrap;
+}
+
+.range input[type='range'] {
+  width: 100%;
+  accent-color: #4f46e5;
+}
+
+.rangeValue {
+  font-variant-numeric: tabular-nums;
+  color: #1f2937;
+  font-weight: 600;
+  text-align: right;
+}
+
+.rangeDisabled {
+  opacity: 0.4;
+}
+
+.debugGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 5px;
+}
+
+.chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  font-size: 11px;
+  color: #6b7280;
+  padding: 5px 4px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+
+.chip input {
+  display: none;
+}
+
+.chip:hover {
+  border-color: #c7cad1;
+}
+
+.chipActive {
+  border-color: #4f46e5;
+  background: #eef2ff;
+  color: #4338ca;
+  font-weight: 600;
+}

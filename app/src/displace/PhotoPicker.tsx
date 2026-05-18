@@ -6,50 +6,15 @@ type Props = {
   onPick: (src: string) => void;
 };
 
-type Group = {
-  key: string;
-  label: string;
-  urls: string[];
-};
-
-const GROUP_LABELS: Record<string, string> = {
-  tshirt: '短袖 T',
-  longsleeve: '长袖 T',
-  hoodie: '卫衣',
-  existing: '原有素材',
-};
-
 function cleanUrl(url: string) {
   return url.split('?')[0];
 }
 
-function modelGroup(url: string) {
-  const path = cleanUrl(url);
-  const name = path.split('/').pop() ?? '';
-  if (path.includes('/models/')) return 'existing';
-  if (name.includes('hoodie')) return 'hoodie';
-  if (name.includes('longsleeve')) return 'longsleeve';
-  return 'tshirt';
-}
-
-function groupModels(urls: string[]): Group[] {
-  const grouped = urls.reduce<Record<string, string[]>>((acc, url) => {
-    const key = modelGroup(url);
-    acc[key] = [...(acc[key] ?? []), url];
-    return acc;
-  }, {});
-  return ['tshirt', 'longsleeve', 'hoodie', 'existing']
-    .filter((key) => grouped[key]?.length)
-    .map((key) => ({ key, label: GROUP_LABELS[key], urls: grouped[key] }));
-}
-
 export default function PhotoPicker({ current, onPick }: Props) {
   const presets = useModelUrls();
-  const groups = groupModels(presets);
 
   const handleFile = (file: File) => {
-    const url = URL.createObjectURL(file);
-    onPick(url);
+    onPick(URL.createObjectURL(file));
   };
 
   return (
@@ -69,25 +34,18 @@ export default function PhotoPicker({ current, onPick }: Props) {
           <span>上传模特图</span>
         </label>
       </div>
-      <div className={s.assetGroups}>
-        {groups.map((group) => (
-          <section key={group.key} className={s.assetGroup} aria-label={group.label}>
-            <div className={s.groupLabel}>{group.label}</div>
-            <div className={s.thumbs}>
-              {group.urls.map((url) => (
-                <button
-                  key={url}
-                  type="button"
-                  data-photo-src={url}
-                  className={`${s.thumb}${url === current ? ' ' + s.thumbActive : ''}`}
-                  onClick={() => onPick(url)}
-                  title={cleanUrl(url).split('/').pop() ?? ''}
-                >
-                  <img src={url} alt="" loading="lazy" />
-                </button>
-              ))}
-            </div>
-          </section>
+      <div className={s.thumbs}>
+        {presets.map((url) => (
+          <button
+            key={url}
+            type="button"
+            data-photo-src={url}
+            className={`${s.thumb}${url === current ? ' ' + s.thumbActive : ''}`}
+            onClick={() => onPick(url)}
+            title={cleanUrl(url).split('/').pop() ?? ''}
+          >
+            <img src={url} alt="" loading="lazy" />
+          </button>
         ))}
       </div>
     </div>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { decodeCachedMap, loadCachedMap, saveCachedMap } from '../shading';
 import { estimateDepth } from './depthPipeline';
+import { recordStage } from './perfBus';
 
 const DEPTH_MACRO_PREFIX = 'depth-cache:v4:';
 const DEPTH_FINE_PREFIX = 'depth-fine-cache:v5:';
@@ -64,12 +65,14 @@ export function useDepthMap(photo: HTMLImageElement | null, src: string | null):
       setState('idle');
       return;
     }
+    const tStart = performance.now();
     const memHit = depthMemCache.get(src);
     if (memHit) {
       console.log('[depth] mem cache hit (macro+fine)');
       setDepth(memHit.depth);
       setDepthFine(memHit.depthFine);
       setState('ready');
+      recordStage('depth', performance.now() - tStart, 'mem');
       return;
     }
     let cancelled = false;
@@ -88,6 +91,7 @@ export function useDepthMap(photo: HTMLImageElement | null, src: string | null):
           setDepth(macroCanvas);
           setDepthFine(fineCanvas);
           setState('ready');
+          recordStage('depth', performance.now() - tStart, 'localStorage');
           return;
         } catch (e) {
           console.warn('[depth] cached decode failed, re-inferring:', e);
@@ -106,6 +110,7 @@ export function useDepthMap(photo: HTMLImageElement | null, src: string | null):
         setDepth(maps.depth);
         setDepthFine(maps.depthFine);
         setState('ready');
+        recordStage('depth', performance.now() - tStart, 'compute');
       } catch (e) {
         if (cancelled) return;
         console.error('[depth] INFERENCE FAILED:', e);

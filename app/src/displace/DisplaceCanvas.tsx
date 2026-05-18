@@ -1,8 +1,9 @@
-import { Canvas } from '@react-three/fiber';
-import { useEffect, useMemo } from 'react';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import type { Quad } from '../shading';
 import { frag, makeUniforms, vert, type DisplaceUniforms } from './displaceShader';
+import { recordPrint, recordRender } from './perfBus';
 
 export type DebugMode = 'composite' | 'displace' | 'light' | 'shading' | 'fine' | 'foldGrad';
 
@@ -41,7 +42,44 @@ type Props = {
   lift: number;
   lightStrength: number;
   debugMode: DebugMode;
+  // Changes whenever photo OR pattern changes — the render probe times from
+  // here to the next painted frame ("印图渲染耗时") and samples renderer.info.
+  renderKey: string;
 };
+
+// Lives inside <Canvas> so it can reach the WebGLRenderer via r3f hooks.
+// "印图渲染" = wall time from a photo/pattern input change to the first
+// frame that paints it; renderer.info is sampled sparsely (every 32 frames)
+// to surface texture/VRAM leaks without per-frame churn.
+function PerfProbe({ renderKey }: { renderKey: string }) {
+  const gl = useThree((state) => state.gl);
+  const pendingSince = useRef<number | null>(null);
+  const lastKey = useRef('');
+  const frame = useRef(0);
+
+  useEffect(() => {
+    if (renderKey && renderKey !== lastKey.current) {
+      lastKey.current = renderKey;
+      pendingSince.current = performance.now();
+    }
+  }, [renderKey]);
+
+  useFrame(() => {
+    if (pendingSince.current != null) {
+      recordPrint(performance.now() - pendingSince.current);
+      pendingSince.current = null;
+    }
+    if ((frame.current++ & 31) === 0) {
+      recordRender({
+        textures: gl.info.memory.textures,
+        geometries: gl.info.memory.geometries,
+        programs: gl.info.programs?.length ?? 0,
+      });
+    }
+  });
+
+  return null;
+}
 
 export default function DisplaceCanvas(p: Props) {
   const uniforms = useMemo<DisplaceUniforms>(() => makeUniforms(), []);
@@ -166,6 +204,7 @@ export default function DisplaceCanvas(p: Props) {
       dpr={[1, 2]}
       style={{ width: '100%', height: '100%' }}
     >
+      <PerfProbe renderKey={p.renderKey} />
       <mesh>
         {/* 32×32 subdivision = 1089 vertices. Vertex shader samples the
             warp sources at each vertex and outputs the warped pattern UV

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { detectPoseCached, type PoseLandmark } from '../poseDetector';
+import { detectPoseCached, readCachedPose, type PoseLandmark } from '../poseDetector';
 import {
   classifyShirt,
   quadFromLandmarks,
@@ -10,17 +10,21 @@ import {
   type Quad,
   type SceneSample,
 } from '../shading';
+import ControlRail from './ControlRail';
 import DisplaceCanvas, { type DebugMode } from './DisplaceCanvas';
 import { deriveMaps, type DerivedMaps } from './MapPipeline';
 import PatternPicker from './PatternPicker';
+import PerfPanel from './PerfPanel';
 import PhotoPicker from './PhotoPicker';
 import QuadHandles from './QuadHandles';
 import { sampleDepthStats } from './depthStats';
+import { recordStage, resetParse } from './perfBus';
 import { sampleShadingStats } from './shadingStats';
 import { dataCanvasToTexture, loadImage } from './textures';
 import { useDepthMap } from './useDepthMap';
 import { useDisplaceTextures } from './useDisplaceTextures';
 import { useHairMask } from './useHairMask';
+import { usePerfMetrics } from './usePerfMetrics';
 import { useQuadDrag } from './useQuadDrag';
 import s from './DisplacePage.module.css';
 
@@ -80,7 +84,7 @@ export default function DisplacePage() {
   // horizontal slashes on tie-dye) can't occur structurally with mesh
   // interpolation: vertex spacing IS the low-pass, and GPU bilinear
   // guarantees a smooth UV field between vertices.
-  const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(1.0);
+  const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(0.5);
 
   // Photo + pose + maps pipeline.
   useEffect(() => {
@@ -98,12 +102,20 @@ export default function DisplacePage() {
       setPhoto(null);
       setQuad(null);
       setMaps(null);
+      resetParse(performance.now());
       try {
+        const tLoad = performance.now();
         const img = await loadImage(photoSrc);
         if (cancelled) return;
+        recordStage('load', performance.now() - tLoad, 'compute');
         setPhoto(img);
 
         setStatus('pose');
+        // readCachedPose reports the source label *before* detect runs —
+        // detectPoseCached reads the same localStorage entry internally, then
+        // falls back to ML inference only on a miss.
+        const poseCached = !!readCachedPose(photoSrc);
+        const tPose = performance.now();
         let lm: PoseLandmark[] | null = null;
         try {
           lm = await detectPoseCached(img, photoSrc);
@@ -111,12 +123,19 @@ export default function DisplacePage() {
           console.warn('pose fail', e);
         }
         if (cancelled) return;
+        recordStage('pose', performance.now() - tPose, poseCached ? 'localStorage' : 'compute');
         const detectedQuad = lm ? quadFromLandmarks(lm, img.naturalWidth, img.naturalHeight) : null;
         setQuad(detectedQuad);
 
         setStatus('maps');
+        // MapPipeline has its own internal 3-tier cache; surfacing which tier
+        // it hit would mean threading state out of deriveMaps. The measured
+        // wall time already reflects cache-vs-compute, so the label stays
+        // generic here while the number tells the real story.
+        const tMaps = performance.now();
         const derived = await deriveMaps(img, detectedQuad, photoSrc);
         if (cancelled) return;
+        recordStage('maps', performance.now() - tMaps, 'compute');
         setMaps(derived);
         setStatus(detectedQuad ? 'ready' : 'fail');
       } catch (e) {
@@ -352,6 +371,7 @@ export default function DisplacePage() {
     );
   }, [sceneSample, tint]);
   const drag = useQuadDrag(quad, setQuad, photoSize);
+  const perf = usePerfMetrics(drag.dragging);
 
   // Mouse-wheel / trackpad-pinch resize on the canvas. Bound via
   // addEventListener with passive:false so we can preventDefault — React's
@@ -386,118 +406,133 @@ export default function DisplacePage() {
     setPhotoSrc(src);
   };
 
+  // Spinner lifecycle: spin only while there is actual async work — the
+  // photo-parse pipeline, or applying a freshly-picked pattern. Once the
+  // model is parsed and we're just idling until the user picks a pattern,
+  // the spinner stops and we show a calm prompt instead.
+  const failed = status === 'fail';
+  const parsing = status === 'loading' || status === 'pose' || status === 'maps';
+  const awaitingPattern = status === 'ready' && !patternSrc;
+  const applyingPattern = status === 'ready' && !!patternSrc && !ready;
+  const spinnerText = parsing
+    ? status === 'loading'
+      ? '加载图片…'
+      : status === 'pose'
+        ? '识别人体姿态…'
+        : '派生光影 + 位移图…'
+    : '应用图案…';
+  const stepIndex = status === 'loading' ? 0 : status === 'pose' ? 1 : 2;
+
   return (
     <main className={s.page} data-displace-status={status} data-depth-state={depthResult.state} data-hair-state={hairResult.state} data-photo-src={photoSrc ?? ''}>
-      <div className={s.toolbar}>
-        <PhotoPicker current={photoSrc} onPick={pickPhoto} />
-        <PatternPicker current={patternSrc} onPick={setPatternSrc} />
-        <div className={s.controls}>
-          <label className={s.range}>
-            图案大小 <input type="range" min={0.4} max={2.0} step={0.02} value={scale}
-              onChange={(e) => setScale(Number(e.target.value))} />
-            <span>{scale.toFixed(2)}</span>
-          </label>
-          <label className={s.range}>
-            光照 <input type="range" min={0} max={2} step={0.05} value={light}
-              onChange={(e) => setLightStrength(Number(e.target.value))} />
-            <span>{light.toFixed(2)}</span>
-          </label>
-          <label className={s.range}>
-            整体亮度 <input type="range" min={0.3} max={1.2} step={0.05} value={sceneBrightness}
-              onChange={(e) => setSceneBrightness(Number(e.target.value))} />
-            <span>{sceneBrightness.toFixed(2)}</span>
-          </label>
-          <label className={s.range}>
-            贴合强度 <input type="range" min={0} max={30} step={0.5} value={depthWrapStrength}
-              onChange={(e) => setDepthWrapStrength(Number(e.target.value))}
-              disabled={!depthTex} />
-            <span>{depthWrapStrength.toFixed(1)}</span>
-          </label>
-          <label className={s.range}>
-            褶皱深度 <input type="range" min={0} max={3} step={0.05} value={wrinkleDepthStrength}
-              onChange={(e) => setWrinkleDepthStrength(Number(e.target.value))}
-              disabled={!shadingTex} />
-            <span>{wrinkleDepthStrength.toFixed(2)}</span>
-          </label>
-          <div className={s.debugRadios}>
-            {(['composite', 'displace', 'light', 'shading', 'fine', 'foldGrad'] as DebugMode[]).map((m) => (
-              <label key={m}>
-                <input type="radio" name="debug-mode" checked={debug === m} onChange={() => setDebugMode(m)} />
-                {m === 'composite'
-                  ? '合成'
-                  : m === 'displace'
-                    ? '位移'
-                    : m === 'light'
-                      ? '光照'
-                      : m === 'shading'
-                        ? 'Shading'
-                        : m === 'fine'
-                          ? 'Fine'
-                          : '褶皱强度'}
-              </label>
-            ))}
-          </div>
+      <header className={s.topbar}>
+        <div className={s.pickerCol}>
+          <PhotoPicker current={photoSrc} onPick={pickPhoto} />
         </div>
-      </div>
-      <div className={s.stage}>
-        {!photoSrc && <div className={s.empty}>选个模特图开始</div>}
-        {photoSrc && !ready && (
-          <div className={s.empty}>
-            {status === 'loading' && '加载中…'}
-            {status === 'pose' && '识别姿态…'}
-            {status === 'maps' && '派生 displace + light…'}
-            {status === 'fail' && '识别失败'}
-            {status === 'ready' && !patternTex && '请选择一张图案'}
-          </div>
-        )}
-        {ready && (
-          <div
-            ref={stageRef}
-            className={s.canvasFrame}
-            style={{ aspectRatio: `${aspect}`, cursor: drag.dragging ? 'grabbing' : 'grab' }}
-            onPointerDown={drag.onPointerDown}
-            onPointerMove={drag.onPointerMove}
-            onPointerUp={drag.onPointerUp}
-            onPointerCancel={drag.onPointerUp}
-          >
-            <DisplaceCanvas
-              photoTex={photoTex}
-              patternTex={patternTex}
-              displaceTex={displaceTex}
-              wrinkleDisplaceTex={wrinkleDisplaceTex}
-              lightTex={lightTex}
-              shadingTex={shadingTex}
-              photoSize={photoSize}
-              quad={scaledQuad}
-              strength={strength}
-              dispSign={1}
-              depthWrap={depthWrap}
-              wrinkleStrength={shadingTex ? wrinkleDepthStrength * shadingStats.autoScale * wrinkleDarkBoost : 0}
-              shadingP10={shadingStats.p10}
-              shadingP90={shadingStats.p90}
-              zCenter={depthStats.center}
-              zRange={depthStats.range}
-              printCenterUV={printCenterUV}
-              envRGB={envRGB}
-              garmentRGB={garmentRGB}
-              hairTex={hairTex}
-              tint={tint}
-              sceneBrightness={sceneBrightness}
-              lift={lift}
-              lightStrength={light}
-              debugMode={debug}
-            />
-            {quad && (
-              <QuadHandles
-                quad={quad}
-                scaledQuad={scaledQuad}
+        <div className={s.pickerCol}>
+          <PatternPicker current={patternSrc} onPick={setPatternSrc} />
+        </div>
+      </header>
+
+      <div className={s.workspace}>
+        <div className={s.stage}>
+          {!photoSrc && <div className={s.empty}>选个模特图开始</div>}
+          {photoSrc && !ready && failed && (
+            <div className={`${s.loadingText} ${s.loadingFail}`}>未识别到人体</div>
+          )}
+          {photoSrc && !ready && !failed && awaitingPattern && (
+            <div className={s.empty}>模特图已就绪 · 选一张图案</div>
+          )}
+          {photoSrc && !ready && !failed && (parsing || applyingPattern) && (
+            <div className={s.loading}>
+              <div className={s.spinner} aria-hidden />
+              <div className={s.loadingText}>{spinnerText}</div>
+              {parsing && (
+                <div className={s.steps}>
+                  {['加载', '姿态', '光影'].map((label, i) => (
+                    <span
+                      key={label}
+                      className={`${s.step} ${i < stepIndex ? s.stepDone : ''} ${
+                        i === stepIndex ? s.stepActive : ''
+                      }`}
+                    >
+                      {label}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {ready && (
+            <div
+              ref={stageRef}
+              className={s.canvasFrame}
+              style={{ aspectRatio: `${aspect}`, cursor: drag.dragging ? 'grabbing' : 'grab' }}
+              onPointerDown={drag.onPointerDown}
+              onPointerMove={drag.onPointerMove}
+              onPointerUp={drag.onPointerUp}
+              onPointerCancel={drag.onPointerUp}
+            >
+              <DisplaceCanvas
+                photoTex={photoTex}
+                patternTex={patternTex}
+                displaceTex={displaceTex}
+                wrinkleDisplaceTex={wrinkleDisplaceTex}
+                lightTex={lightTex}
+                shadingTex={shadingTex}
                 photoSize={photoSize}
-                scale={scale}
-                setScale={setScale}
+                quad={scaledQuad}
+                strength={strength}
+                dispSign={1}
+                depthWrap={depthWrap}
+                wrinkleStrength={shadingTex ? wrinkleDepthStrength * shadingStats.autoScale * wrinkleDarkBoost : 0}
+                shadingP10={shadingStats.p10}
+                shadingP90={shadingStats.p90}
+                zCenter={depthStats.center}
+                zRange={depthStats.range}
+                printCenterUV={printCenterUV}
+                envRGB={envRGB}
+                garmentRGB={garmentRGB}
+                hairTex={hairTex}
+                tint={tint}
+                sceneBrightness={sceneBrightness}
+                lift={lift}
+                lightStrength={light}
+                debugMode={debug}
+                renderKey={`${photoSrc ?? ''}|${patternSrc ?? ''}`}
               />
-            )}
-          </div>
-        )}
+              {quad && (
+                <QuadHandles
+                  quad={quad}
+                  scaledQuad={scaledQuad}
+                  photoSize={photoSize}
+                  scale={scale}
+                  setScale={setScale}
+                />
+              )}
+            </div>
+          )}
+        </div>
+
+        <aside className={s.rail}>
+          <ControlRail
+            scale={scale}
+            setScale={setScale}
+            light={light}
+            setLight={setLightStrength}
+            sceneBrightness={sceneBrightness}
+            setSceneBrightness={setSceneBrightness}
+            depthWrap={depthWrapStrength}
+            setDepthWrap={setDepthWrapStrength}
+            depthEnabled={!!depthTex}
+            wrinkle={wrinkleDepthStrength}
+            setWrinkle={setWrinkleDepthStrength}
+            wrinkleEnabled={!!shadingTex}
+            debug={debug}
+            setDebug={setDebugMode}
+          />
+          <PerfPanel metrics={perf} />
+        </aside>
       </div>
     </main>
   );

@@ -1,0 +1,141 @@
+.panel {
+  border: 1px solid #e9ebef;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  overflow: hidden;
+}
+
+.header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #111827;
+  letter-spacing: 0.01em;
+}
+
+.chevron {
+  font-size: 13px;
+  color: #9ca3af;
+  transition: transform 0.15s ease;
+  transform: rotate(180deg);
+}
+
+.chevronOpen {
+  transform: rotate(0deg);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 12px 11px;
+}
+
+.metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.metricLabel {
+  font-size: 11.5px;
+  color: #6b7280;
+}
+
+.metricValue {
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #1f2937;
+}
+
+.good {
+  color: #15803d;
+}
+
+.warn {
+  color: #b45309;
+}
+
+.bad {
+  color: #b91c1c;
+}
+
+.idle {
+  color: #9ca3af;
+}
+
+.stages {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 12px;
+  margin: 2px 0 4px;
+  padding: 7px 9px;
+  background: #f7f8fa;
+  border-radius: 7px;
+}
+
+.stageRow {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.stageName {
+  color: #9ca3af;
+  min-width: 26px;
+}
+
+.stageMs {
+  color: #374151;
+  font-variant-numeric: tabular-nums;
+  flex: 1;
+  text-align: right;
+}
+
+.src {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 0 4px;
+  border-radius: 4px;
+  line-height: 15px;
+}
+
+.src_mem {
+  background: #e0e7ff;
+  color: #4338ca;
+}
+
+.src_localStorage {
+  background: #e5e7eb;
+  color: #4b5563;
+}
+
+.src_compute {
+  background: #fde9c8;
+  color: #b45309;
+}
+
+.meta {
+  font-size: 10.5px;
+  color: #9ca3af;
+  font-variant-numeric: tabular-nums;
+  padding-top: 5px;
+  border-top: 1px solid #f0f1f4;
+  margin-top: 2px;
+}
