@@ -3,7 +3,7 @@
 // the in-Canvas render probe) so a single shared sink + rAF-coalesced
 // notification beats threading a collector prop through every hook.
 
-export type StageName = 'load' | 'pose' | 'maps' | 'depth' | 'hair';
+export type StageName = 'load' | 'pose' | 'maps' | 'depth' | 'hair' | 'cloth';
 export type CacheSource = 'compute' | 'mem' | 'localStorage';
 
 export type StageRec = { ms: number; source: CacheSource };
@@ -15,7 +15,7 @@ export type PerfSnapshot = {
   render: { textures: number; geometries: number; programs: number } | null;
 };
 
-const STAGE_ORDER: StageName[] = ['load', 'pose', 'maps', 'depth', 'hair'];
+const STAGE_ORDER: StageName[] = ['load', 'pose', 'maps', 'depth', 'hair', 'cloth'];
 
 let snapshot: PerfSnapshot = {
   parseStart: null,

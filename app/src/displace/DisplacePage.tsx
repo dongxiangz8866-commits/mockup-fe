@@ -22,6 +22,7 @@ import { sampleDepthStats } from './depthStats';
 import { recordStage, resetParse } from './perfBus';
 import { sampleShadingStats } from './shadingStats';
 import { dataCanvasToTexture, loadImage } from './textures';
+import { useClothMask } from './useClothMask';
 import { useDepthMap } from './useDepthMap';
 import { useDisplaceTextures } from './useDisplaceTextures';
 import { useHairMask } from './useHairMask';
@@ -47,8 +48,23 @@ function autoLightStrength(garment: GarmentSample): number {
   const minRGB = Math.min(r, g, b);
   const sat = maxRGB > 0 ? (maxRGB - minRGB) / maxRGB : 0;
   const key = classifyShirt(garment);
-  if (key === 'white') return 1.35;
-  if (key === 'black') return 0.45;
+  // 越白越大 / 越黑越小. The light map is the DoG fold map, not raw shirt
+  // luminance — but on dark cloth buildShadingMap's FLOOR=40 amplifies
+  // sensor/JPEG noise into broad spurious sub-128 (= darkening) that crushes
+  // a bright print to dull olive, while on bright cloth the fold shading is
+  // genuine. So trust the map ∝ garment perceived brightness (max(R,G,B),
+  // the project's perceived-darkness metric — see wrinkleDarkBoost).
+  if (key === 'white') {
+    // off-white (maxRGB≈200) → 1.0  …  pure white (255) → 1.5
+    const t = Math.max(0, Math.min(1, (maxRGB - 200) / 55));
+    return 1.0 + t * 0.5;
+  }
+  if (key === 'black') {
+    // near-black (maxRGB→0) → 0 (print stays true color, no spurious dim)
+    // … dark-but-not-black (maxRGB≈90) → 0.55
+    const t = Math.max(0, Math.min(1, maxRGB / 90));
+    return t * 0.55;
+  }
 
   // Saturated shirts have low luminance in BT.601 even when visually bright
   // (red is the obvious case). Keep their multiply-light contribution weak
@@ -80,15 +96,20 @@ export default function DisplacePage() {
   const lift = 0.0;
   const tint = 0.5;
   const strength = 1.0;
-  const [depthWrapStrength, setDepthWrapStrength] = useState(2.0);
+  // 2.0 → 1.0 (2026-05-18): user accepts the print curves to follow the body
+  // but wants the curve gentle, not a hard barrel. The cloth-mask gate in the
+  // shader keeps this confined to the garment; this just softens its amount.
+  const [depthWrapStrength, setDepthWrapStrength] = useState(1.0);
   const [debug, setDebugMode] = useState<DebugMode>('composite');
-  // Default 1.0 — restored after the mesh-warp refactor (2026-05-13) moved
-  // the fold push from per-fragment to per-vertex sampling. The artefacts
-  // that forced default=0 on the per-fragment version (wave fragmentation,
-  // horizontal slashes on tie-dye) can't occur structurally with mesh
-  // interpolation: vertex spacing IS the low-pass, and GPU bilinear
-  // guarantees a smooth UV field between vertices.
-  const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(0.5);
+  // Default 0 — the documented clean baseline. The mesh-warp refactor
+  // (2026-05-13) drifted this up to 0.5 on the claim that vertex-sparse
+  // sampling + GPU interpolation can't wave-fragment. True for HIGH-freq
+  // cracking, but on a flat studio tee (no real folds, weak/noisy shading)
+  // the low-freq fold push still bends a clean rectangular logo into a
+  // wavy torn shape — the exact "碎/波浪 on flat/weak cloth" ceiling this
+  // path has been iterated to a dead-end. Off by default; the slider is
+  // still there to raise it on shirts with genuine drape.
+  const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(0);
 
   // Photo + pose + maps pipeline.
   useEffect(() => {
@@ -180,6 +201,15 @@ export default function DisplacePage() {
   );
   const aspect = photoSize ? photoSize.w / photoSize.h : 0.667;
 
+  // Native bitmap aspect of the artwork. The shader fits the pattern into the
+  // physical print rectangle preserving THIS ratio (contain) instead of
+  // stretching it to the near-square print quad — fixes wide logos getting
+  // vertically distorted.
+  const patternAspect = useMemo(
+    () => (patternImg ? patternImg.naturalWidth / patternImg.naturalHeight : 1.0),
+    [patternImg]
+  );
+
   // Depth path — bypasses photo-DoG Sobel entirely. The shader instead
   // receives:
   //   • MACRO depth (heavily blurred) on uDisplace — drives the radial
@@ -230,6 +260,31 @@ export default function DisplacePage() {
   useEffect(
     () => () => { hairTex?.dispose(); },
     [hairTex]
+  );
+
+  // Garment mask — B-route warp/relight gate. Fallback is 1×1 WHITE (not the
+  // black hair fallback): mask-absent must mean "treat everything as cloth" =
+  // ungated wrap = the exact pre-B3 behavior, so a slow or failed segmenter
+  // degrades gracefully to the old result instead of silently killing the
+  // wrap the user asked for. Once a real mask arrives it tightens the warp to
+  // the garment.
+  const blankClothCanvas = useMemo(() => {
+    const c = document.createElement('canvas');
+    c.width = 1;
+    c.height = 1;
+    const cx = c.getContext('2d')!;
+    cx.fillStyle = '#fff';
+    cx.fillRect(0, 0, 1, 1);
+    return c;
+  }, []);
+  const clothResult = useClothMask(photo, photoSrc);
+  const clothTex = useMemo(
+    () => dataCanvasToTexture(clothResult.cloth ?? blankClothCanvas),
+    [clothResult.cloth, blankClothCanvas]
+  );
+  useEffect(
+    () => () => { clothTex?.dispose(); },
+    [clothTex]
   );
 
   // Depth handles broad torso curvature on the macro tex; FINE depth feeds
@@ -428,7 +483,7 @@ export default function DisplacePage() {
   const stepIndex = status === 'loading' ? 0 : status === 'pose' ? 1 : 2;
 
   return (
-    <main className={s.page} data-displace-status={status} data-depth-state={depthResult.state} data-hair-state={hairResult.state} data-photo-src={photoSrc ?? ''}>
+    <main className={s.page} data-displace-status={status} data-depth-state={depthResult.state} data-hair-state={hairResult.state} data-cloth-state={clothResult.state} data-photo-src={photoSrc ?? ''}>
       <header className={s.topbar}>
         <div className={s.pickerCol}>
           <PhotoPicker current={photoSrc} onPick={pickPhoto} />
@@ -492,6 +547,7 @@ export default function DisplacePage() {
                 shadingTex={shadingTex}
                 photoSize={photoSize}
                 quad={scaledQuad}
+                patternAspect={patternAspect}
                 strength={strength}
                 dispSign={1}
                 depthWrap={depthWrap}
@@ -504,6 +560,7 @@ export default function DisplacePage() {
                 envRGB={envRGB}
                 garmentRGB={garmentRGB}
                 hairTex={hairTex}
+                clothTex={clothTex}
                 tint={tint}
                 sceneBrightness={sceneBrightness}
                 lift={lift}

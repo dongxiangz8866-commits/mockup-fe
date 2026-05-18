@@ -5,7 +5,7 @@ import type { Quad } from '../shading';
 import { frag, makeUniforms, vert, type DisplaceUniforms } from './displaceShader';
 import { recordPrint, recordRender } from './perfBus';
 
-export type DebugMode = 'composite' | 'displace' | 'light' | 'shading' | 'fine' | 'foldGrad';
+export type DebugMode = 'composite' | 'displace' | 'light' | 'shading' | 'fine' | 'foldGrad' | 'cloth';
 
 const debugModeIndex: Record<DebugMode, number> = {
   composite: 0,
@@ -14,6 +14,7 @@ const debugModeIndex: Record<DebugMode, number> = {
   shading: 3,
   fine: 4,
   foldGrad: 5,
+  cloth: 6,
 };
 
 type Props = {
@@ -25,6 +26,7 @@ type Props = {
   shadingTex: THREE.Texture;
   photoSize: { w: number; h: number };
   quad: Quad;
+  patternAspect: number;
   strength: number;
   dispSign: number;
   depthWrap: number;
@@ -37,6 +39,7 @@ type Props = {
   envRGB: [number, number, number];
   garmentRGB: [number, number, number];
   hairTex: THREE.Texture;
+  clothTex: THREE.Texture;
   tint: number;
   sceneBrightness: number;
   lift: number;
@@ -95,6 +98,7 @@ export default function DisplaceCanvas(p: Props) {
     uniforms.uLight.value = p.lightTex;
     uniforms.uShading.value = p.shadingTex;
     uniforms.uHairMask.value = p.hairTex;
+    uniforms.uClothMask.value = p.clothTex;
   }, [
     uniforms,
     p.photoTex,
@@ -104,6 +108,7 @@ export default function DisplaceCanvas(p: Props) {
     p.lightTex,
     p.shadingTex,
     p.hairTex,
+    p.clothTex,
   ]);
 
   useEffect(() => {
@@ -117,6 +122,10 @@ export default function DisplaceCanvas(p: Props) {
     uniforms.uQuadTR.value.set(p.quad.tr.x / W, p.quad.tr.y / H);
     uniforms.uQuadBL.value.set(p.quad.bl.x / W, p.quad.bl.y / H);
   }, [uniforms, p.quad, p.photoSize.w, p.photoSize.h]);
+
+  useEffect(() => {
+    uniforms.uPatternAspect.value = p.patternAspect;
+  }, [uniforms, p.patternAspect]);
 
   useEffect(() => {
     uniforms.uStrength.value = p.strength;

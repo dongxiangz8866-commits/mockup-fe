@@ -25,6 +25,7 @@ const DEBUG_LABEL: Record<DebugMode, string> = {
   shading: 'Shading',
   fine: 'Fine',
   foldGrad: '褶皱强度',
+  cloth: '布料',
 };
 
 type RangeProps = {
@@ -56,7 +57,7 @@ function Range({ label, value, min, max, step, onChange, disabled }: RangeProps)
 }
 
 export default function ControlRail(p: Props) {
-  const modes: DebugMode[] = ['composite', 'displace', 'light', 'shading', 'fine', 'foldGrad'];
+  const modes: DebugMode[] = ['composite', 'displace', 'light', 'shading', 'fine', 'foldGrad', 'cloth'];
   return (
     <section className={c.rail}>
       <div className={c.groupTitle}>调节</div>

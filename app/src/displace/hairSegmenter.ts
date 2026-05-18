@@ -20,7 +20,10 @@ let segmenterPromise: Promise<ImageSegmenter> | null = null;
 // Same lazy-singleton-with-rejection-reset pattern as poseDetector and
 // depthPipeline: a transient CDN/WASM-init flake on first call would
 // otherwise permanently poison the singleton until full page reload.
-function getSegmenter(): Promise<ImageSegmenter> {
+// Exported so clothSegmenter reuses THIS instance — the selfie-multiclass
+// model emits hair (class 1) and clothes (class 4) from one graph; sharing
+// the singleton means no second model download, only a second segment() call.
+export function getSegmenter(): Promise<ImageSegmenter> {
   if (segmenterPromise) return segmenterPromise;
   const p = (async () => {
     const vision = await FilesetResolver.forVisionTasks(WASM_BASE);

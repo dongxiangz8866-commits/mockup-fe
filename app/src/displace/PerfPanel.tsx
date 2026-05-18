@@ -11,6 +11,7 @@ const STAGE_LABEL: Record<StageName, string> = {
   maps: '光影',
   depth: '深度',
   hair: '头发',
+  cloth: '布料',
 };
 
 const SOURCE_LABEL: Record<CacheSource, string> = {
@@ -50,7 +51,7 @@ function Metric({ label, value, tone }: { label: string; value: string; tone: To
 export default function PerfPanel({ metrics }: { metrics: PerfMetrics }) {
   const [open, setOpen] = useState(true);
   const { snapshot, parseTotalMs, drag } = metrics;
-  const stages: StageName[] = ['load', 'pose', 'maps', 'depth', 'hair'];
+  const stages: StageName[] = ['load', 'pose', 'maps', 'depth', 'hair', 'cloth'];
   const dragText = drag.fps == null
     ? '—'
     : `${drag.fps} fps · p95 ${drag.p95Ms} ms`;

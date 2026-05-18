@@ -100,6 +100,14 @@ export const vert = /* glsl */ `
       float zHere = dispCol.r;
       float drop = clamp((uZCenter - zHere) / max(uZCenter, 0.01), 0.0, 1.0);
       vec2 fromCenter = puv - uPrintCenterUV;
+      // The warp field MUST stay globally smooth. Do NOT modulate this
+      // displacement by the cloth mask: B3 multiplied it by per-vertex
+      // clothHere and the near-binary mask transition sheared the pattern
+      // into an irregular "变形" at the garment boundary (the documented
+      // "warp magnitude modulated by a non-smooth signal → 碎/切/形变"
+      // failure). The cloth mask only clips ALPHA in the fragment shader
+      // (visibility, geometry-free); off-garment the print is invisible
+      // regardless of how this smooth warp moved it.
       puvWarped = uPrintCenterUV + fromCenter * (1.0 + drop * uDepthWrap * uStrength * uDispSign);
 
       // LOCAL FOLD COMPRESSION — coherent radial push modulated by local
@@ -170,6 +178,7 @@ export const frag = /* glsl */ `
   uniform sampler2D uLight;
   uniform sampler2D uShading;
   uniform sampler2D uHairMask;
+  uniform sampler2D uClothMask;    // garment mask (R=1 cloth) — B-route warp/relight gate
 
   uniform vec3  uEnvRGB;
   uniform vec3  uGarmentRGB;
@@ -183,6 +192,7 @@ export const frag = /* glsl */ `
   uniform vec2  uQuadTL;
   uniform vec2  uQuadTR;
   uniform vec2  uQuadBL;
+  uniform float uPatternAspect;    // pattern bitmap width/height — for aspect-preserving fit
   uniform int   uDebugMode;
   uniform float uDepthWrap;        // kept for the legacy-path debug view only
   uniform float uWrinkleStrength;  // kept so the debug ∇Shading view matches live signal
@@ -201,7 +211,31 @@ export const frag = /* glsl */ `
 
   void main() {
     vec2 puv = vUv;
-    vec2 patUV = photoToPatternUV(vPuvWarped);
+
+    // ASPECT-PRESERVING FIT (contain). photoToPatternUV gives quad-normalized
+    // (u,v) ∈ [0,1]²; sampling the pattern with that directly stretches the
+    // whole bitmap onto the quad, and the quad is locked to the physical print
+    // area aspect (PRINT_ASPECT ≈ 1:1, modelAssets.ts). A wide logo squashed
+    // into a near-square quad is the "上下变形" the user reported.
+    //
+    // Fix: place the artwork at its native aspect, centered inside the print
+    // rectangle (what a real print shop does), with transparent letterbox
+    // margins. Work in physical-proportional units where 1 = quad height, so
+    // the quad spans quadAspect × 1. Pick the largest box of aspect
+    // uPatternAspect that fits, center it, remap into its [0,1]² — the margin
+    // falls outside [0,1] and the existing fwidth edge-cut clips it away.
+    vec2 q = photoToPatternUV(vPuvWarped);
+    float quadW = length((uQuadTR - uQuadTL) * uPhotoSize);
+    float quadH = length((uQuadBL - uQuadTL) * uPhotoSize);
+    float quadAspect = quadW / max(quadH, 1e-4);
+    float boxW = (uPatternAspect >= quadAspect) ? quadAspect : uPatternAspect;
+    float boxH = (uPatternAspect >= quadAspect) ? quadAspect / max(uPatternAspect, 1e-4) : 1.0;
+    float boxLeft = (quadAspect - boxW) * 0.5;
+    float boxTop  = (1.0 - boxH) * 0.5;
+    vec2 patUV = vec2(
+      (q.x * quadAspect - boxLeft) / boxW,
+      (q.y - boxTop) / boxH
+    );
 
     vec4 patCol = texture2D(uPattern, patUV);
 
@@ -212,6 +246,17 @@ export const frag = /* glsl */ `
     vec2 hi = vec2(1.0) - smoothstep(vec2(1.0) - fw, vec2(1.0), patUV);
     float inside = lo.x * lo.y * hi.x * hi.y;
     patCol.a *= inside;
+
+    // CLOTH CLIP (Route B / B4). B3's mask only gated the warp, so the print
+    // still rendered as a floating rectangle wherever the quad spilled past
+    // the shirt (onto arms / background). Clip its alpha to the garment mask
+    // sampled at the on-screen UV: the print now ends at the shirt silhouette
+    // and feathers out at the seam = "edge conforms to cloth". Soft smoothstep
+    // (not a hard cut) + the CPU-side morphological close on uClothMask keep
+    // this off failure-archive A's hole-dropping path; the white 1×1
+    // mask-absent fallback makes clothClip→1 ⇒ exact pre-clip behavior.
+    float clothClip = smoothstep(0.25, 0.6, texture2D(uClothMask, puv).r);
+    patCol.a *= clothClip;
 
     // Environmental chromatic adaptation (sampled at nominal puv since
     // env color is a property of the scene, not the displaced pattern).
@@ -268,6 +313,7 @@ export const frag = /* glsl */ `
       float strengthDbg = smoothstep(0.05, 0.20, depressionDbg);
       outRGB = vec3(strengthDbg);
     }
+    else if (uDebugMode == 6) outRGB = vec3(texture2D(uClothMask, puv).r);
 
     gl_FragColor = vec4(outRGB, 1.0);
   }
@@ -281,6 +327,7 @@ export type DisplaceUniforms = {
   uLight: { value: THREE.Texture | null };
   uShading: { value: THREE.Texture | null };
   uHairMask: { value: THREE.Texture | null };
+  uClothMask: { value: THREE.Texture | null };
   uStrength: { value: number };
   uDispSign: { value: number };
   uDepthWrap: { value: number };
@@ -302,6 +349,7 @@ export type DisplaceUniforms = {
   uQuadTL: { value: THREE.Vector2 };
   uQuadTR: { value: THREE.Vector2 };
   uQuadBL: { value: THREE.Vector2 };
+  uPatternAspect: { value: number };
   uDebugMode: { value: number };
 };
 
@@ -314,6 +362,7 @@ export function makeUniforms(): DisplaceUniforms {
     uLight: { value: null },
     uShading: { value: null },
     uHairMask: { value: null },
+    uClothMask: { value: null },
     uStrength: { value: 1.0 },
     uDispSign: { value: 1.0 },
     uDepthWrap: { value: 0.0 },
@@ -335,6 +384,7 @@ export function makeUniforms(): DisplaceUniforms {
     uQuadTL: { value: new THREE.Vector2(0, 0) },
     uQuadTR: { value: new THREE.Vector2(1, 0) },
     uQuadBL: { value: new THREE.Vector2(0, 1) },
+    uPatternAspect: { value: 1.0 },
     uDebugMode: { value: 0 },
   };
 }
