@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "postbuild": "node scripts/trim-dist.mjs",
     "preview": "vite preview",
     "screenshot": "node scripts/screenshot-thumbs.mjs",
     "screenshot:displace": "node scripts/screenshot-displace.mjs"
