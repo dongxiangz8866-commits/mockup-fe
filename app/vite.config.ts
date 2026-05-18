@@ -89,6 +89,11 @@ function assetsApiPlugin(): Plugin {
 }
 
 export default defineConfig({
+  // Root hosts (Netlify/Vercel/Cloudflare/custom domain) use '/'. For a
+  // subpath deploy (e.g. GitHub Pages project site user.github.io/repo/)
+  // build with VITE_BASE=/repo/ — keeps asset URLs correct without
+  // breaking root deploys.
+  base: process.env.VITE_BASE || '/',
   plugins: [react(), assetsApiPlugin()],
   server: { port: 5174, strictPort: true },
   define: {

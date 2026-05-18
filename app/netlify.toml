@@ -1,0 +1,22 @@
+# Netlify: point the site's base directory at app/ (this file lives there).
+[build]
+  command = "corepack enable && pnpm install --frozen-lockfile && pnpm build"
+  publish = "dist"
+
+# Hashed bundles are content-addressed → cache forever. index.html and the
+# rest stay revalidated so a redeploy is picked up immediately.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# Optional cross-origin isolation (enables threaded WASM = faster depth).
+# DISABLED by default: COEP:require-corp blocks the runtime ML-model
+# fetches from MediaPipe / HF CDNs unless those send CORP headers, which
+# would break analysis for everyone. Only enable if you self-host the
+# model weights. See DEPLOY.md.
+# [[headers]]
+#   for = "/*"
+#   [headers.values]
+#     Cross-Origin-Opener-Policy = "same-origin"
+#     Cross-Origin-Embedder-Policy = "require-corp"
