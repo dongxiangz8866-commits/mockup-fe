@@ -17,9 +17,9 @@ type Props = {
   smooth: number;
   setSmooth: (n: number) => void;
   smoothEnabled: boolean;
-  // /gradient only. Absent on /displace ⇒ no toggle, default debug labels.
-  gradientSrc?: 'depth' | 'luma';
-  setGradientSrc?: (s: 'depth' | 'luma') => void;
+  // /gradient only: relabels the "fine" debug chip to "梯度源" (the active
+  // warp-source view). The source toggle itself lives in the top bar now.
+  gradientMode?: boolean;
   debug: DebugMode;
   setDebug: (m: DebugMode) => void;
 };
@@ -63,17 +63,12 @@ function Range({ label, value, min, max, step, onChange, disabled }: RangeProps)
   );
 }
 
-const GRADIENT_SRC: { id: 'depth' | 'luma'; label: string }[] = [
-  { id: 'depth', label: 'DAv2 深度' },
-  { id: 'luma', label: 'ImageMagick' },
-];
-
 export default function ControlRail(p: Props) {
   const modes: DebugMode[] = ['composite', 'displace', 'light', 'shading', 'fine', 'foldGrad', 'cloth', 'smoothField'];
-  // On /gradient the "fine" slot IS the active ∇-warp source — relabel the
+  // On /gradient the "fine" slot IS the active warp source — relabel the
   // chip so it's discoverable as "where you see the generated displace map".
   const debugLabel = (m: DebugMode) =>
-    p.setGradientSrc && m === 'fine' ? '梯度源' : DEBUG_LABEL[m];
+    p.gradientMode && m === 'fine' ? '梯度源' : DEBUG_LABEL[m];
   return (
     <section className={c.rail}>
       <div className={c.groupTitle}>调节</div>
@@ -114,28 +109,6 @@ export default function ControlRail(p: Props) {
         onChange={p.setSmooth}
         disabled={!p.smoothEnabled}
       />
-
-      {p.setGradientSrc && (
-        <>
-          <div className={c.groupTitle}>梯度源</div>
-          <div className={c.debugGrid}>
-            {GRADIENT_SRC.map((g) => (
-              <label
-                key={g.id}
-                className={`${c.chip} ${p.gradientSrc === g.id ? c.chipActive : ''}`}
-              >
-                <input
-                  type="radio"
-                  name="gradient-src"
-                  checked={p.gradientSrc === g.id}
-                  onChange={() => p.setGradientSrc?.(g.id)}
-                />
-                {g.label}
-              </label>
-            ))}
-          </div>
-        </>
-      )}
 
       <div className={c.groupTitle}>调试视图</div>
       <div className={c.debugGrid}>

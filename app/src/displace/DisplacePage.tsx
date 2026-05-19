@@ -147,13 +147,11 @@ export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpM
   //             body shape + FOLD crease relief. Every wrinkle casts a
   //             shadow in luma, so this carries the folds DAv2 lost — it
   //             IS the reference's actual displace source.
-  // Default 'depth': luma's FOLD relief is HIGH-freq — driving the radial
-  // wrap with it squished the artwork ("变形了"). The user's refined ask:
-  // SMOOTH body-cylinder depth is the main 贴合 (DAv2 is smooth ⇒ the print
-  // curves with the torso without the artwork itself deforming); folds are
-  // combined in SMOOTHLY via smoothWarp (low-pass fold field written into z,
-  // value-injected, non-distorting), NOT via the high-freq ∇-fold push.
-  const [gradientSrc, setGradientSrc] = useState<'depth' | 'luma'>('depth');
+  // Default 'luma' by user request ("梯度源默认 imagemagick"): uDisplace =
+  // buildLumaDisplace (FORM+FOLD). NOTE the fold field (smoothWarp) is
+  // ImageMagick either way; this toggle only swaps the BODY/radial source
+  // (luma map vs DAv2). 'depth' is the A/B fallback (smoother body cylinder).
+  const [gradientSrc, setGradientSrc] = useState<'depth' | 'luma'>('luma');
 
   // Photo + pose + maps pipeline.
   useEffect(() => {
@@ -680,6 +678,22 @@ export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpM
         <div className={s.pickerCol}>
           <PatternPicker current={patternSrc} onPick={setPatternSrc} />
         </div>
+        {warpMode === 'gradient' && (
+          <div className={s.srcToggle} role="radiogroup" aria-label="梯度源">
+            {(['luma', 'depth'] as const).map((id) => (
+              <button
+                key={id}
+                type="button"
+                role="radio"
+                aria-checked={gradientSrc === id}
+                className={gradientSrc === id ? s.srcOn : ''}
+                onClick={() => setGradientSrc(id)}
+              >
+                {id === 'luma' ? 'ImageMagick' : 'DAv2 深度'}
+              </button>
+            ))}
+          </div>
+        )}
       </header>
 
       <div className={s.workspace}>
@@ -796,8 +810,7 @@ export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpM
             depthWrap={depthWrapStrength}
             setDepthWrap={setDepthWrapStrength}
             depthEnabled={warpMode === 'gradient' ? useLuma || !!depthTex : !!depthTex}
-            gradientSrc={warpMode === 'gradient' ? gradientSrc : undefined}
-            setGradientSrc={warpMode === 'gradient' ? setGradientSrc : undefined}
+            gradientMode={warpMode === 'gradient'}
             wrinkle={wrinkleDepthStrength}
             setWrinkle={setWrinkleDepthStrength}
             wrinkleEnabled={!!shadingTex}

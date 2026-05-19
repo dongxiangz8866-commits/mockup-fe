@@ -31,6 +31,34 @@
   border-left: 1px solid #eef0f3;
 }
 
+/* Gradient-source switch — top bar, compact (off the crowded right rail). */
+.srcToggle {
+  flex-shrink: 0;
+  align-self: center;
+  display: flex;
+  border: 1px solid #d9dde3;
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.srcToggle button {
+  border: 0;
+  background: #ffffff;
+  color: #6b7280;
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.srcToggle button + button {
+  border-left: 1px solid #d9dde3;
+}
+
+.srcToggle .srcOn {
+  background: #111827;
+  color: #ffffff;
+}
+
 /* ── Workspace: centered tall preview + fixed right rail ───────── */
 .workspace {
   flex: 1;
