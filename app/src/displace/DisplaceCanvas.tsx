@@ -32,6 +32,7 @@ type Props = {
   strength: number;
   dispSign: number;
   depthWrap: number;
+  gradientWarp: number;
   wrinkleStrength: number;
   smoothWarp: number;
   smoothCenter: number;
@@ -52,6 +53,12 @@ type Props = {
   // Changes whenever photo OR pattern changes — the render probe times from
   // here to the next painted frame ("印图渲染耗时") and samples renderer.info.
   renderKey: string;
+  // Warp-mesh subdivision. /displace stays 32 (its noise-low-pass baseline);
+  // /gradient passes a higher value so a visible warp stays a SMOOTH curve
+  // instead of a ~10-segment polygon across the print ("不平滑/太狠"). Safe
+  // to raise here only because the /gradient field is a heavily-smoothed DoG
+  // band (no high-freq to alias at the denser vertices).
+  segments?: number;
 };
 
 // Lives inside <Canvas> so it can reach the WebGLRenderer via r3f hooks.
@@ -144,6 +151,10 @@ export default function DisplaceCanvas(p: Props) {
   useEffect(() => {
     uniforms.uDepthWrap.value = p.depthWrap;
   }, [uniforms, p.depthWrap]);
+
+  useEffect(() => {
+    uniforms.uGradientWarp.value = p.gradientWarp;
+  }, [uniforms, p.gradientWarp]);
 
   useEffect(() => {
     uniforms.uWrinkleStrength.value = p.wrinkleStrength;
@@ -241,7 +252,7 @@ export default function DisplaceCanvas(p: Props) {
             vertices ~47 px apart. Folds smaller than that are smoothed
             into the interpolation; folds larger than 50 px (the regime
             the user actually cares about) bend the print smoothly. */}
-        <planeGeometry args={[2, 2, 32, 32]} />
+        <planeGeometry args={[2, 2, p.segments ?? 32, p.segments ?? 32]} />
         <shaderMaterial
           vertexShader={vert}
           fragmentShader={frag}

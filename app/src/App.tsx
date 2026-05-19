@@ -11,6 +11,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<DisplacePage />} />
           <Route path="/displace" element={<DisplacePage />} />
+          <Route path="/gradient" element={<DisplacePage warpMode="gradient" />} />
           <Route path="/canvaskit" element={<CanvasKitPage />} />
           <Route path="/shading" element={<ShadingLayout />} />
         </Routes>

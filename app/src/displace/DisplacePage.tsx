@@ -12,6 +12,7 @@ import {
 } from '../shading';
 import ControlRail from './ControlRail';
 import DisplaceCanvas, { type DebugMode } from './DisplaceCanvas';
+import { buildLumaDisplace, buildLumaFold, buildLumaLight } from './lumaDisplace';
 import { deriveMaps, type DerivedMaps } from './MapPipeline';
 import PatternPicker from './PatternPicker';
 import PerfPanel from './PerfPanel';
@@ -42,6 +43,22 @@ const garmentMemCache = new Map<string, GarmentSample>();
 // Same rationale as garmentMemCache: env color is a SCENE property and does
 // not change as the user drags the print around. Keyed by photoSrc only.
 const sceneMemCache = new Map<string, SceneSample>();
+// /gradient luma-source cache. buildLumaDisplace is a full-frame getImageData
+// + 3 canvas blurs (~tens of ms) — recomputing on every drag tick would
+// freeze the UI exactly like the garment sample would. Keyed by src + a
+// cloth-presence suffix so the map is rebuilt once when the async cloth mask
+// arrives (no-mask global-mean version → mask-eased version).
+const lumaMemCache = new Map<string, HTMLCanvasElement>();
+// Reference-port SHADING map (gen-psd-set.sh `light`). This — not the
+// geometric warp — is what reads as "wrapped on the body": broad torso
+// roundness + CLAHE fold shadows multiplied onto the print. Same cache
+// rationale/key as lumaMemCache.
+const lumaLightMemCache = new Map<string, HTMLCanvasElement>();
+// ImageMagick FOLD field (body-removed, smoothed) — the fold source the
+// user wants ("我的褶皱是要 imagemagick"), value-injected into the depth z
+// via smoothWarp so DAv2 carries the body cylinder and THIS carries the
+// creases DAv2 misses, without distorting the artwork. Same cache key.
+const lumaFoldMemCache = new Map<string, HTMLCanvasElement>();
 
 function autoLightStrength(garment: GarmentSample): number {
   const [r, g, b] = garment.rgb;
@@ -75,7 +92,15 @@ function autoLightStrength(garment: GarmentSample): number {
   return 0.45 + (0.18 - 0.45) * vivid * brightColor;
 }
 
-export default function DisplacePage() {
+// warpMode picks how the pattern UV is bent:
+//   'radial'   — DAv2 depth radial-drop cylinder wrap + fold terms (/displace)
+//   'gradient' — port of mock-research's GradientDisplaceFilter: low-pass
+//                ∇(fine depth) pushes the pattern UV (/gradient). The shared
+//                "贴合强度" slider feeds the gradient strength; the radial
+//                wrap is forced off so only the reference operator runs.
+type WarpMode = 'radial' | 'gradient';
+
+export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpMode } = {}) {
   const [photoSrc, setPhotoSrc] = useState<string | null>(null);
   const [patternSrc, setPatternSrc] = useState<string | null>(null);
   // Edit handles reveal on hover/drag only — keeps the composite clean to
@@ -102,14 +127,12 @@ export default function DisplacePage() {
   // shader keeps this confined to the garment; this just softens its amount.
   const [depthWrapStrength, setDepthWrapStrength] = useState(1.0);
   const [debug, setDebugMode] = useState<DebugMode>('composite');
-  // Default 0 — the documented clean baseline. The mesh-warp refactor
-  // (2026-05-13) drifted this up to 0.5 on the claim that vertex-sparse
-  // sampling + GPU interpolation can't wave-fragment. True for HIGH-freq
-  // cracking, but on a flat studio tee (no real folds, weak/noisy shading)
-  // the low-freq fold push still bends a clean rectangular logo into a
-  // wavy torn shape — the exact "碎/波浪 on flat/weak cloth" ceiling this
-  // path has been iterated to a dead-end. Off by default; the slider is
-  // still there to raise it on shirts with genuine drape.
+  // Default 0 everywhere. This is the ∇shading direction push — it bends the
+  // artwork ALONG each crease, i.e. it is exactly the "变形" the user
+  // rejected ("褶皱不要做的太变形了，变形的不要"). Fold influence now comes
+  // from smoothWarp (smooth fold field into z, non-distorting) instead. The
+  // slider ("褶皱深度") is still there to dial in a little crease bite
+  // knowingly, but it ships OFF so the default is clean conform, no deform.
   const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(0);
   // 2026-05-19 user idea: write a low-pass fold field INTO the depth z and
   // reuse the proven absolute-radial-drop cylinder wrap. User evaluated it
@@ -117,6 +140,20 @@ export default function DisplacePage() {
   // photo. On a flat studio front-T the field is ~flat ⇒ negligible effect
   // (signal isn't in the pixels); on real drape it's the bumpy-cylinder wrap.
   const [smoothWarp, setSmoothWarp] = useState(1);
+  // /gradient: which grayscale map drives the radial wrap.
+  //   'depth' — DAv2 macro depth. Smooth body shape but monocular depth
+  //             ABSORBS fold detail — the user's "dav2 很多褶皱它没有".
+  //   'luma'  — buildLumaDisplace (ImageMagick gen-psd-set.sh port): FORM
+  //             body shape + FOLD crease relief. Every wrinkle casts a
+  //             shadow in luma, so this carries the folds DAv2 lost — it
+  //             IS the reference's actual displace source.
+  // Default 'depth': luma's FOLD relief is HIGH-freq — driving the radial
+  // wrap with it squished the artwork ("变形了"). The user's refined ask:
+  // SMOOTH body-cylinder depth is the main 贴合 (DAv2 is smooth ⇒ the print
+  // curves with the torso without the artwork itself deforming); folds are
+  // combined in SMOOTHLY via smoothWarp (low-pass fold field written into z,
+  // value-injected, non-distorting), NOT via the high-freq ∇-fold push.
+  const [gradientSrc, setGradientSrc] = useState<'depth' | 'luma'>('depth');
 
   // Photo + pose + maps pipeline.
   useEffect(() => {
@@ -294,14 +331,116 @@ export default function DisplacePage() {
     [clothTex]
   );
 
+  // ImageMagick-port luma displace, built only when /gradient is on the luma
+  // source. Memoized per src (cloth-suffixed) via lumaMemCache so dragging the
+  // print never rebuilds it. cloth=null → builder uses a global mean and
+  // skips the off-garment ease (graceful, matches the project's mask-absent
+  // = treat-as-cloth philosophy; the warp is still alpha-clipped to cloth in
+  // the fragment shader).
+  const lumaCanvas = useMemo<HTMLCanvasElement | null>(() => {
+    if (warpMode !== 'gradient' || gradientSrc !== 'luma' || !photo || !photoSrc) return null;
+    const key = `${photoSrc}|${clothResult.cloth ? 'm' : 'n'}`;
+    const cached = lumaMemCache.get(key);
+    if (cached) return cached;
+    const built = buildLumaDisplace(photo, clothResult.cloth ?? null);
+    lumaMemCache.set(key, built);
+    return built;
+  }, [warpMode, gradientSrc, photo, photoSrc, clothResult.cloth]);
+  const lumaTex = useMemo(
+    () => (lumaCanvas ? dataCanvasToTexture(lumaCanvas) : null),
+    [lumaCanvas]
+  );
+  useEffect(
+    () => () => { lumaTex?.dispose(); },
+    [lumaTex]
+  );
+
+  // Reference SHADING map, built alongside the luma displace under the same
+  // gate/cache. Fed into the existing uLight multiply slot (no shader
+  // change) so the print reads as wrapped on the torso — the actual "贴合"
+  // lever, geometric warp is only a minor helper.
+  const lumaLightCanvas = useMemo<HTMLCanvasElement | null>(() => {
+    if (warpMode !== 'gradient' || gradientSrc !== 'luma' || !photo || !photoSrc) return null;
+    const key = `${photoSrc}|${clothResult.cloth ? 'm' : 'n'}`;
+    const cached = lumaLightMemCache.get(key);
+    if (cached) return cached;
+    const built = buildLumaLight(photo, clothResult.cloth ?? null);
+    lumaLightMemCache.set(key, built);
+    return built;
+  }, [warpMode, gradientSrc, photo, photoSrc, clothResult.cloth]);
+  const lumaLightTex = useMemo(
+    () => (lumaLightCanvas ? dataCanvasToTexture(lumaLightCanvas) : null),
+    [lumaLightCanvas]
+  );
+  useEffect(
+    () => () => { lumaLightTex?.dispose(); },
+    [lumaLightTex]
+  );
+
+  // ImageMagick FOLD field, built whenever /gradient is active (independent
+  // of the depth/luma source toggle — DAv2 stays the body z, this is always
+  // the fold source). Value-injected via uSmoothField/smoothWarp.
+  const lumaFoldCanvas = useMemo<HTMLCanvasElement | null>(() => {
+    if (warpMode !== 'gradient' || !photo || !photoSrc) return null;
+    const cached = lumaFoldMemCache.get(photoSrc);
+    if (cached) return cached;
+    // No cloth mask — globally smooth DoG band (the white-on-white segmenter
+    // is garbage; gating by it is what tore the edges in image 5).
+    const built = buildLumaFold(photo);
+    lumaFoldMemCache.set(photoSrc, built);
+    return built;
+  }, [warpMode, photo, photoSrc]);
+  const lumaFoldTex = useMemo(
+    () => (lumaFoldCanvas ? dataCanvasToTexture(lumaFoldCanvas) : null),
+    [lumaFoldCanvas]
+  );
+  useEffect(
+    () => () => { lumaFoldTex?.dispose(); },
+    [lumaFoldTex]
+  );
+
   // Depth handles broad torso curvature on the macro tex; FINE depth feeds
   // the per-fragment ∇z fold term in the shader. When ML depth is unavailable
   // we fall back to the photo-DoG Sobel map on the macro slot (legacy path,
   // uDepthWrap=0 there) — fine slot stays null and the shader gracefully
   // skips the gradient term because uWrinkleStrength gates it.
   const displaceTex: THREE.Texture | null = depthTex ?? dogDisplaceTex;
-  const wrinkleDisplaceTex: THREE.Texture | null = depthFineTex ?? dogDisplaceTex;
-  const depthWrap = depthTex ? depthWrapStrength : 0.0;
+  const useLuma = warpMode === 'gradient' && gradientSrc === 'luma' && !!lumaTex;
+  // THE radial-wrap source (uDisplace = the `drop` map). gradient+luma feeds
+  // the fold-rich ImageMagick map into the SAME proven radial mechanism DAv2
+  // uses — that's "用 imagemagick 做贴合". Its print-center reference
+  // (effZCenter, below) must be sampled from this same map or `drop` is junk.
+  const effDisplaceTex: THREE.Texture | null = useLuma
+    ? lumaTex
+    : displaceTex;
+  // uWrinkleDisplace = the debug "梯度源" view + dormant ∇ branch; show the
+  // active source there too.
+  const wrinkleDisplaceTex: THREE.Texture | null = useLuma
+    ? lumaTex
+    : depthFineTex ?? dogDisplaceTex;
+  // Radial wrap = the body 包裹 (works at the flat chest via absolute z-drop,
+  // unlike ∇). Strong whenever the active source exists; the DoG-∇ fold
+  // terms (uWrinkleStrength, on by default here) ride on top to sink the
+  // print into every crease. The dormant ∇ branch (uGradientWarp) is retired
+  // — radial-on-luma supersedes it. /displace path unchanged.
+  // 6→3→2: image 7's overall arc was still too deep / unnatural ("没这么深
+  // 的…弧形"). A subtle body curve; the "贴合强度" slider scales from here.
+  const GRAD_DEPTH_BOOST = 2.0;
+  const sourceReady = useLuma || (gradientSrc === 'depth' && !!depthTex);
+  const depthWrap =
+    warpMode === 'gradient'
+      ? sourceReady
+        ? depthWrapStrength * GRAD_DEPTH_BOOST
+        : 0.0
+      : depthTex
+        ? depthWrapStrength
+        : 0.0;
+  const gradientWarp = 0.0;
+  // Reference SHADING replaces the DoG-light slot in gradient+luma — same
+  // uLight multiply, but a body-roundness map instead of fold edges. Falls
+  // back to the maps-derived light until the (sync) build lands.
+  const effLightTex: THREE.Texture | null =
+    useLuma && lumaLightTex ? lumaLightTex : lightTex;
 
   // User-controlled pattern size: scale the pose-detected quad around its
   // own center. Drag still operates on the unscaled `quad` (translation
@@ -335,6 +474,16 @@ export default function DisplacePage() {
     [depthResult.depth, scaledQuad]
   );
 
+  // Same quad-center sampler on the ImageMagick map. The radial `drop` is
+  // (zCenter − zHere); zCenter MUST come from whatever map feeds uDisplace,
+  // so when luma drives the wrap its center reference is the luma map's, not
+  // DAv2's (mixing them makes the print translate instead of conform).
+  const lumaStats = useMemo(
+    () => (lumaCanvas ? sampleDepthStats(lumaCanvas, scaledQuad) : null),
+    [lumaCanvas, scaledQuad]
+  );
+  const effZCenter = useLuma && lumaStats ? lumaStats.center : depthStats.center;
+
   // Smooth-field value at the print center — the z'-injection's center
   // reference, so drop' = (z'_center − z'_here)/z'_center stays 0 at the
   // print center (no net translation of the whole print). Reuses the same
@@ -343,6 +492,18 @@ export default function DisplacePage() {
     () => (maps?.smooth ? sampleDepthStats(maps.smooth, scaledQuad).center : 0.0),
     [maps, scaledQuad]
   );
+
+  // /gradient: the smooth fold field IS the ImageMagick fold map (not the
+  // generic low-pass-luma maps.smooth which washes creases out). Its
+  // center reference must come from that same map (same rule as effZCenter).
+  const lumaFoldStats = useMemo(
+    () => (lumaFoldCanvas ? sampleDepthStats(lumaFoldCanvas, scaledQuad) : null),
+    [lumaFoldCanvas, scaledQuad]
+  );
+  const useGradFold = warpMode === 'gradient' && !!lumaFoldTex;
+  const effSmoothTex: THREE.Texture | null = useGradFold ? lumaFoldTex : smoothTex;
+  const effSmoothCenter =
+    useGradFold && lumaFoldStats ? lumaFoldStats.center : smoothCenter;
 
   // Per-image shading percentiles inside the pose quad. Drives slider
   // normalization — the wrinkle slider previously meant "DoG contrast
@@ -420,11 +581,16 @@ export default function DisplacePage() {
   useEffect(() => {
     if (!garment) return;
     const meanLum = garment.rgb[0] * 0.299 + garment.rgb[1] * 0.587 + garment.rgb[2] * 0.114;
-    const ls = autoLightStrength(garment);
+    // gradient+luma uses the reference SHADING map (already only-darken and
+    // garment-recentred) — its wrap IS the point, so apply it at full
+    // strength instead of the colored-shirt auto value (~0.2) that exists to
+    // protect the artwork from the noisier DoG light. User can still dial it.
+    const ls =
+      warpMode === 'gradient' && gradientSrc === 'luma' ? 1.0 : autoLightStrength(garment);
     const maxRGB = Math.max(garment.rgb[0], garment.rgb[1], garment.rgb[2]);
     console.log(`[overlap] garmentMeanLum=${meanLum.toFixed(0)} maxRGB=${maxRGB.toFixed(0)} → lightStrength=${ls.toFixed(2)}`);
     setLightStrength(ls);
-  }, [garment]);
+  }, [garment, warpMode, gradientSrc]);
 
   // Debug: log env signal so we can tell whether 色彩融合 is gated off
   // (envSat too low) vs just visually subtle. Logs both highlight-based color
@@ -472,7 +638,7 @@ export default function DisplacePage() {
   );
 
   const ready =
-    status === 'ready' && photoTex && patternTex && displaceTex && wrinkleDisplaceTex && lightTex && shadingTex && smoothTex && scaledQuad && photoSize;
+    status === 'ready' && photoTex && patternTex && effDisplaceTex && wrinkleDisplaceTex && effLightTex && shadingTex && effSmoothTex && scaledQuad && photoSize;
 
   // Wrap setPhotoSrc so photo/quad/maps are cleared SYNCHRONOUSLY in the
   // same React 18 event batch. Without this, the render right after
@@ -564,23 +730,24 @@ export default function DisplacePage() {
               <DisplaceCanvas
                 photoTex={photoTex}
                 patternTex={patternTex}
-                displaceTex={displaceTex}
+                displaceTex={effDisplaceTex}
                 wrinkleDisplaceTex={wrinkleDisplaceTex}
-                lightTex={lightTex}
+                lightTex={effLightTex}
                 shadingTex={shadingTex}
-                smoothTex={smoothTex}
+                smoothTex={effSmoothTex}
                 photoSize={photoSize}
                 quad={scaledQuad}
                 patternAspect={patternAspect}
                 strength={strength}
                 dispSign={1}
                 depthWrap={depthWrap}
+                gradientWarp={gradientWarp}
                 wrinkleStrength={shadingTex ? wrinkleDepthStrength * shadingStats.autoScale * wrinkleDarkBoost : 0}
-                smoothWarp={smoothTex ? smoothWarp : 0}
-                smoothCenter={smoothCenter}
+                smoothWarp={effSmoothTex ? smoothWarp : 0}
+                smoothCenter={effSmoothCenter}
                 shadingP10={shadingStats.p10}
                 shadingP90={shadingStats.p90}
-                zCenter={depthStats.center}
+                zCenter={effZCenter}
                 zRange={depthStats.range}
                 printCenterUV={printCenterUV}
                 envRGB={envRGB}
@@ -592,6 +759,7 @@ export default function DisplacePage() {
                 lift={lift}
                 lightStrength={light}
                 debugMode={debug}
+                segments={warpMode === 'gradient' ? 96 : 32}
                 renderKey={`${photoSrc ?? ''}|${patternSrc ?? ''}`}
               />
               {quad && (
@@ -627,7 +795,9 @@ export default function DisplacePage() {
             setSceneBrightness={setSceneBrightness}
             depthWrap={depthWrapStrength}
             setDepthWrap={setDepthWrapStrength}
-            depthEnabled={!!depthTex}
+            depthEnabled={warpMode === 'gradient' ? useLuma || !!depthTex : !!depthTex}
+            gradientSrc={warpMode === 'gradient' ? gradientSrc : undefined}
+            setGradientSrc={warpMode === 'gradient' ? setGradientSrc : undefined}
             wrinkle={wrinkleDepthStrength}
             setWrinkle={setWrinkleDepthStrength}
             wrinkleEnabled={!!shadingTex}

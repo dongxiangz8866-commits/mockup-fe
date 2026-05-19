@@ -39,6 +39,7 @@ export const vert = /* glsl */ `
   varying vec2 vPuvWarped;
 
   uniform sampler2D uDisplace;
+  uniform sampler2D uWrinkleDisplace;
   uniform sampler2D uShading;
   uniform sampler2D uSmoothField;
   uniform sampler2D uPhoto;
@@ -46,6 +47,8 @@ export const vert = /* glsl */ `
   uniform float uStrength;
   uniform float uDispSign;
   uniform float uDepthWrap;
+  // /gradient route gate + strength (0 ⇒ off ⇒ /displace byte-identical).
+  uniform float uGradientWarp;
   uniform float uWrinkleStrength;
   // Low-pass fold field ADDED into the depth z (CPU sample at print center
   // = uSmoothCenter, analogous to uZCenter). 0 ⇒ no z perturbation ⇒ the
@@ -91,6 +94,22 @@ export const vert = /* glsl */ `
   const float FOLD_GRAD_TAP = 15.0;
   const float FOLD_GRAD_AMP_PX = 25.0;
 
+  // /gradient route — port of mock-research's GradientDisplaceFilter.
+  // REF_SPREAD: finite-difference baseline in photo px. The reference used a
+  // 3-texel baseline on a high-CONTRAST PSD map. Our default source is the
+  // luma-FORM map (broad ~2%-of-dim blur ⇒ very smooth): a 3-px difference on
+  // it is ≈0, so the print barely warps ("不够贴"). A wide 10-px baseline
+  // reads the broad body-form slope while STILL being a low-pass derivative
+  // (linear-filtered, the noise-not-latching property the reference needs).
+  const float REF_SPREAD = 6.0;
+  // Per-unit-gradient gain in px. 40→12: cranking this only BENT the artwork
+  // (the user's "增大贴合强度就变形" — on flat studio cloth a geometric warp
+  // is pure distortion, not wrap). gen-psd-set.sh deliberately keeps
+  // displacementStrength≈1 and gets "贴合" from the SHADING/light map, which
+  // is now ported into the uLight slot. Geometric warp is back to a minor
+  // helper: only meaningfully acts where a real fold crosses the print.
+  const float REF_AMP_PX = 12.0;
+
   void main() {
     vec2 puv = vec2(uv.x, 1.0 - uv.y);
     vUv = puv;
@@ -98,7 +117,26 @@ export const vert = /* glsl */ `
     vec4 dispCol = texture2D(uDisplace, puv);
 
     vec2 puvWarped;
-    if (uDepthWrap > 0.0) {
+    if (uGradientWarp > 0.0) {
+      // REFERENCE LOW-PASS GRADIENT WARP (/gradient route).
+      // mock-research has no depth — its folds come from a hand-authored
+      // PSD grayscale displace map, whose low-pass luma gradient pushes the
+      // graphic UV (GradientDisplaceFilter). Here the depth analog of that
+      // map is FINE depth (uWrinkleDisplace) — the fold/crease-carrying
+      // tier (macro is heavily blurred body curvature, no wrinkles). Same
+      // operator: ∇(low-pass map), then offset the pattern UV down it.
+      // No cloth-mask gate on the warp — kept globally smooth (the sealed
+      // "never modulate displacement by a non-smooth signal" rule); the
+      // fragment shader still clips the print alpha to the garment.
+      vec2 spreadTx = vec2(REF_SPREAD) / uPhotoSize;
+      float lL = texture2D(uWrinkleDisplace, puv - vec2(spreadTx.x, 0.0)).r;
+      float lR = texture2D(uWrinkleDisplace, puv + vec2(spreadTx.x, 0.0)).r;
+      float lT = texture2D(uWrinkleDisplace, puv - vec2(0.0, spreadTx.y)).r;
+      float lB = texture2D(uWrinkleDisplace, puv + vec2(0.0, spreadTx.y)).r;
+      vec2 grad = vec2(lR - lL, lB - lT);
+      vec2 offUV = grad * REF_AMP_PX * uGradientWarp * uStrength * uDispSign / uPhotoSize;
+      puvWarped = puv - offUV;
+    } else if (uDepthWrap > 0.0) {
       // RADIAL DEPTH WARP — drop = (Z_center − Z_pixel) / Z_center.
       // Outward push proportional to local depth drop and distance from
       // print center; same math as the old per-fragment version, just
@@ -354,6 +392,7 @@ export type DisplaceUniforms = {
   uStrength: { value: number };
   uDispSign: { value: number };
   uDepthWrap: { value: number };
+  uGradientWarp: { value: number };
   uWrinkleStrength: { value: number };
   uSmoothWarp: { value: number };
   uSmoothCenter: { value: number };
@@ -392,6 +431,7 @@ export function makeUniforms(): DisplaceUniforms {
     uStrength: { value: 1.0 },
     uDispSign: { value: 1.0 },
     uDepthWrap: { value: 0.0 },
+    uGradientWarp: { value: 0.0 },
     uWrinkleStrength: { value: 1.0 },
     uSmoothWarp: { value: 0.0 },
     uSmoothCenter: { value: 0.0 },
