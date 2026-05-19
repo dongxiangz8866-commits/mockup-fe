@@ -1,4 +1,5 @@
 import type { CanvasKit, Image, RuntimeEffect, Surface } from 'canvaskit-wasm';
+import type { Quad } from '../shading';
 import type { Mesh } from './buildMesh';
 import { COMPOSITE_SKSL, packUniforms, type CompositeUniforms } from './skSLComposite';
 
@@ -136,4 +137,56 @@ export function renderCanvasKit(a: RenderArgs): void {
   compShader.delete();
   compPaint.delete();
   warped.delete();
+}
+
+// Closed-loop calibration probe. Reads back the just-rendered main surface
+// over the print quad and returns the printed region's PERCEPTUAL luma
+// spread (P90−P10, sRGB→~L*). The caller turns this into a residual that
+// pulls foldK toward a fixed target — so "fold contrast" is MEASURED on the
+// real (garment,pattern,light) output, not predicted from color (which is
+// un-exhaustible). Runs once per photo/pattern (gated by renderKey), never
+// on drag, so it stays off the 60 fps path. Returns −1 if unavailable.
+export function measurePrintedContrast(
+  ck: CanvasKit,
+  canvas: HTMLCanvasElement,
+  quad: Quad,
+  surfaceScale: number
+): number {
+  const surf = cache.get(canvas);
+  if (!surf) { if (import.meta.env.DEV) console.log('[foldCalib] no cached surface'); return -1; }
+  const sw = canvas.width;
+  const sh = canvas.height;
+  const xs = [quad.tl.x, quad.tr.x, quad.bl.x, quad.br.x].map((v) => v * surfaceScale);
+  const ys = [quad.tl.y, quad.tr.y, quad.bl.y, quad.br.y].map((v) => v * surfaceScale);
+  const x0 = Math.max(0, Math.floor(Math.min(...xs)));
+  const y0 = Math.max(0, Math.floor(Math.min(...ys)));
+  const x1 = Math.min(sw, Math.ceil(Math.max(...xs)));
+  const y1 = Math.min(sh, Math.ceil(Math.max(...ys)));
+  const bw = x1 - x0;
+  const bh = y1 - y0;
+  if (bw < 8 || bh < 8) { if (import.meta.env.DEV) console.log(`[foldCalib] bbox ${bw}x${bh}`); return -1; }
+
+  const snap = surf.main.makeImageSnapshot([x0, y0, x1, y1]);
+  const px = snap.readPixels(0, 0, {
+    width: bw,
+    height: bh,
+    colorType: ck.ColorType.RGBA_8888,
+    alphaType: ck.AlphaType.Unpremul,
+    colorSpace: ck.ColorSpace.SRGB,
+  }) as Uint8Array | null;
+  snap.delete();
+  if (!px) { if (import.meta.env.DEV) console.log('[foldCalib] readPixels null'); return -1; }
+
+  // Stride-sample (~4 k points), sRGB byte → perceptual luma.
+  const stride = Math.max(1, Math.floor(Math.sqrt((bw * bh) / 4096))) * 4;
+  const lums: number[] = [];
+  for (let i = 0; i + 2 < px.length; i += stride) {
+    if (px[i + 3] < 8) continue; // transparent (outside the composited rect)
+    const l = (px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114) / 255;
+    lums.push(Math.pow(l, 1 / 2.2));
+  }
+  if (lums.length < 32) { if (import.meta.env.DEV) console.log(`[foldCalib] only ${lums.length} samples`); return -1; }
+  lums.sort((a, b) => a - b);
+  const p = (q: number) => lums[Math.min(lums.length - 1, Math.round((lums.length - 1) * q))];
+  return p(0.9) - p(0.1);
 }

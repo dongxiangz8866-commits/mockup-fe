@@ -9,9 +9,11 @@ import { getCanvasKit } from './canvasKitLoader';
 import {
   blackFallback, clothAlphaCanvas, imageChannel, toChannel, whiteFallback,
 } from './ckSources';
-import { renderCanvasKit } from './renderCanvasKit';
+import { measurePrintedContrast, renderCanvasKit } from './renderCanvasKit';
 
 const MAX_DIM = 1800; // backing-store cap (DAv2 maps are ~518 upsampled)
+const K_RES_MIN = 0.2; // closed-loop residual clamp (foldK pull-down floor)
+const K_RES_MAX = 2.5; // … and boost ceiling for genuinely-flat cloth
 const DBG: Record<DebugMode, number> = {
   composite: 0, displace: 1, light: 2, shading: 3,
   fine: 4, foldGrad: 5, cloth: 6, smoothField: 7,
@@ -45,7 +47,13 @@ type Props = {
   tint: number;
   sceneBrightness: number;
   lift: number;
-  lightStrength: number;
+  // foldK = foldKBase × closed-loop residual. Base = TARGET_K_BASE × slider ×
+  // SNR-confidence (CanvasKitPage); the residual is solved HERE so the
+  // correction is applied synchronously, not via a second React render.
+  foldKBase: number;
+  targetContrast: number;
+  foldSpread: number;
+  blackMargin: number;
   debugMode: DebugMode;
   renderKey: string;
 };
@@ -55,6 +63,9 @@ export default function CanvasKitStage(p: Props) {
   const [ck, setCk] = useState<CanvasKit | null>(null);
   const pendingSince = useRef<number | null>(null);
   const lastKey = useRef('');
+  // Closed-loop residual cached per renderKey (photo|pattern). Drag/slider
+  // keep the same key ⇒ reuse the residual, no re-measure, off the 60 fps path.
+  const residualRef = useRef<{ key: string; r: number }>({ key: '', r: 1 });
 
   useEffect(() => {
     let on = true;
@@ -114,19 +125,41 @@ export default function CanvasKitStage(p: Props) {
       depthWrap: p.depthWrap, strength: p.strength, dispSign: p.dispSign,
       smoothWarp: p.smoothWarp, wrinkleStrength: p.wrinkleStrength,
     });
-    renderCanvasKit({
-      ck, canvas, mesh, photoW: p.photoSize.w, photoH: p.photoSize.h, surfaceScale: scale,
-      patternImg: imgs.pattern, photoImg: imgs.photo, lightImg: imgs.light,
-      shadingImg: imgs.shading, smoothImg: imgs.smooth, displaceImg: imgs.displace,
-      fineImg: imgs.fine, hairImg: imgs.hair, clothClipImg: imgs.clothClip,
-      clothImg: imgs.cloth,
-      uniforms: {
-        envRGB: p.envRGB, garmentRGB: p.garmentRGB, tint: p.tint,
-        sceneBrightness: p.sceneBrightness, lift: p.lift, lightStrength: p.lightStrength,
-        debugMode: DBG[p.debugMode], depthWrap: p.depthWrap,
-        wrinkleStrength: p.wrinkleStrength, shadingP10: p.shadingP10, shadingP90: p.shadingP90,
-      },
-    });
+    const renderWith = (foldK: number) =>
+      renderCanvasKit({
+        ck, canvas, mesh, photoW: p.photoSize.w, photoH: p.photoSize.h, surfaceScale: scale,
+        patternImg: imgs.pattern, photoImg: imgs.photo, lightImg: imgs.light,
+        shadingImg: imgs.shading, smoothImg: imgs.smooth, displaceImg: imgs.displace,
+        fineImg: imgs.fine, hairImg: imgs.hair, clothClipImg: imgs.clothClip,
+        clothImg: imgs.cloth,
+        uniforms: {
+          envRGB: p.envRGB, garmentRGB: p.garmentRGB, tint: p.tint,
+          sceneBrightness: p.sceneBrightness, lift: p.lift, foldK,
+          debugMode: DBG[p.debugMode], depthWrap: p.depthWrap,
+          wrinkleStrength: p.wrinkleStrength, shadingP10: p.shadingP10, shadingP90: p.shadingP90,
+          foldSpread: p.foldSpread, blackMargin: p.blackMargin,
+        },
+      });
+
+    const cached = residualRef.current.key === p.renderKey;
+    renderWith(p.foldKBase * (cached ? residualRef.current.r : 1));
+
+    // First render of a new photo|pattern: measure the printed region and
+    // re-render ONCE with the corrected residual — synchronously, same tick,
+    // so the visible/exported frame is the corrected one regardless of React
+    // timing or photo size. Cached so drag/slider never re-enter this.
+    if (!cached) {
+      const m = measurePrintedContrast(ck, canvas, p.quad, scale);
+      const r =
+        m >= 0
+          ? Math.max(K_RES_MIN, Math.min(K_RES_MAX, p.targetContrast / Math.max(m, 1e-3)))
+          : 1;
+      residualRef.current = { key: p.renderKey, r };
+      if (import.meta.env.DEV) {
+        console.log(`[foldCalib] measured=${m.toFixed(3)} → residual=${r.toFixed(2)}`);
+      }
+      if (Math.abs(r - 1) > 0.02) renderWith(p.foldKBase * r);
+    }
     if (pendingSince.current != null) {
       recordPrint(performance.now() - pendingSince.current);
       pendingSince.current = null;

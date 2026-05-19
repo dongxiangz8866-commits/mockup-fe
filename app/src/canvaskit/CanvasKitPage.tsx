@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { detectPoseCached, readCachedPose, type PoseLandmark } from '../poseDetector';
 import {
-  classifyShirt, quadFromLandmarks, sampleGarment, sampleScene,
+  quadFromLandmarks, sampleGarment, sampleScene,
   type GarmentSample, type Quad, type SceneSample,
 } from '../shading';
 import ControlRail from '../displace/ControlRail';
@@ -23,6 +23,7 @@ import { useHairMask } from '../displace/useHairMask';
 import { usePerfMetrics } from '../displace/usePerfMetrics';
 import { useQuadDrag } from '../displace/useQuadDrag';
 import CanvasKitStage from './CanvasKitStage';
+import { sampleLightStats, softenLightMap } from './lightStats';
 import s from '../displace/DisplacePage.module.css';
 
 type LoadState = 'idle' | 'loading' | 'pose' | 'maps' | 'ready' | 'fail';
@@ -30,21 +31,20 @@ type LoadState = 'idle' | 'loading' | 'pose' | 'maps' | 'ready' | 'fail';
 const garmentMemCache = new Map<string, GarmentSample>();
 const sceneMemCache = new Map<string, SceneSample>();
 
-// /canvaskit-specific light tuning (user spec 2026-05-19; /displace keeps
-// its own — see feedback_displace_autolightstrength_tuning memory):
-//   • black / 深色统一档 (classifyShirt 'black', lumP95<90, 含深蓝) → 0.2
-//   • white / 浅档 → ~1.0
-//   • 'color': perceived-light (淡黄/姜黄/浅蓝, max(R,G,B) 高) → ~1.0;
-//     perceived-dark (深蓝等若够亮落这档) → 0.2. max(R,G,B) is the
-//     project's perceived-darkness metric (navy meanLum low but max high).
-function autoLightStrength(g: GarmentSample): number {
-  const maxRGB = Math.max(g.rgb[0], g.rgb[1], g.rgb[2]);
-  const key = classifyShirt(g);
-  if (key === 'black') return 0.2;
-  if (key === 'white') return 1.0;
-  const t = Math.max(0, Math.min(1, (maxRGB - 100) / 90));
-  return 0.2 + t * 0.8;
-}
+// Fold-lighting target (2026-05-19 redesign — replaces the un-exhaustible
+// per-garment-COLOR autoLightStrength). Tune a TARGET, not a strength:
+//   foldKBase = TARGET_K_BASE × slider × SNR-confidence; the closed-loop
+//   residual is then solved + applied in CanvasKitStage (one shot/photo).
+// Garment/pattern color is absorbed by the shader's headroom rolloff, photo
+// lighting intensity by lightStats.spread, signal trust by .confidence —
+// see lightStats.ts. /displace keeps its own tuning (memory: only /canvaskit).
+const TARGET_K_BASE = 0.55; // deepest trusted fold darkens a bright pixel ≤55%
+const BLACK_MARGIN = 0.2; // pattern pixels below this (max channel) can't darken
+// Closed-loop target: CanvasKitStage measures the printed region and pulls
+// its perceptual contrast toward this fixed value. This is what makes "not
+// too strong / not too weak" hold on the un-exhaustible garment×pattern×
+// light space — it's measured on the real output, not guessed from color.
+const TARGET_CONTRAST = 0.18; // desired printed-region perceptual P90−P10
 
 export default function CanvasKitPage() {
   const [photoSrc, setPhotoSrc] = useState<string | null>(null);
@@ -192,9 +192,26 @@ export default function CanvasKitPage() {
     return 1.7 + Math.max(0, Math.min(1, (maxRGB - 40) / 140)) * (0.4 - 1.7);
   }, [garment]);
 
-  useEffect(() => {
-    if (garment) setLight(autoLightStrength(garment));
-  }, [garment]);
+  // /canvaskit-only softened light map (see softenLightMap): hard bimodal
+  // body-shadow → gentle gradient so white prints read natural, not dirty.
+  // Built once per photo. /displace keeps maps.light raw (untouched).
+  const softLight = useMemo(
+    () => (maps?.light ? softenLightMap(maps.light) : null),
+    [maps]
+  );
+  // Normalizers 1 + 3 — measured on the SOFTENED light map the shader reads
+  // (consistency), cloth-gated. Recomputes on quad like shadingStats.
+  const lightStats = useMemo(
+    () => (softLight ? sampleLightStats(softLight, clothResult.cloth, quad)
+                     : { spread: 0.12, confidence: 1 }),
+    [softLight, clothResult.cloth, quad]
+  );
+  // `light` slider is a scene-independent perceptual fold-contrast TARGET
+  // multiplier (default 1.0), not a raw strength. Garment/pattern color is
+  // absorbed per-pixel in-shader (headroom rolloff); .confidence zeroes out
+  // noise-only dark cloth. CanvasKitStage closes the loop on the MEASURED
+  // output, pulling foldKBase toward targetContrast (once per photo/pattern).
+  const foldKBase = TARGET_K_BASE * light * lightStats.confidence;
 
   const drag = useQuadDrag(quad, setQuad, photoSize);
   const perf = usePerfMetrics(drag.dragging);
@@ -298,7 +315,7 @@ export default function CanvasKitPage() {
                 macroCanvas={depthResult.depth!}
                 smoothCanvas={maps!.smooth}
                 shadingCanvas={maps!.shading}
-                lightCanvas={maps!.light}
+                lightCanvas={softLight ?? maps!.light}
                 fineCanvas={depthResult.depthFine!}
                 hairCanvas={hairResult.hair}
                 clothCanvas={clothResult.cloth}
@@ -318,7 +335,10 @@ export default function CanvasKitPage() {
                 tint={tint}
                 sceneBrightness={sceneBrightness}
                 lift={lift}
-                lightStrength={light}
+                foldKBase={foldKBase}
+                targetContrast={TARGET_CONTRAST}
+                foldSpread={lightStats.spread}
+                blackMargin={BLACK_MARGIN}
                 debugMode={debug}
                 renderKey={`${photoSrc ?? ''}|${patternSrc ?? ''}`}
               />

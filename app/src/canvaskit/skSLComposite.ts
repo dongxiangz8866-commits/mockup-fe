@@ -32,12 +32,14 @@ uniform float3 uGarmentRGB;
 uniform float  uTint;
 uniform float  uSceneBrightness;
 uniform float  uLift;
-uniform float  uLightStrength;
+uniform float  uFoldK;
 uniform float  uDebugMode;
 uniform float  uDepthWrap;
 uniform float  uWrinkleStrength;
 uniform float  uShadingP10;
 uniform float  uShadingP90;
+uniform float  uFoldSpread;
+uniform float  uBlackMargin;
 
 half4 main(float2 fc) {
   float2 uv = fc / uSurf;
@@ -58,8 +60,11 @@ half4 main(float2 fc) {
 
   half3 rgb = pat * uSceneBrightness;
   rgb = rgb * (1.0 - uLift) + half3(uLift);
-  float light = uLight.eval(mp).r;
-  float lightFactor = mix(1.0, light, uLightStrength);
+  float light = uLight.eval(mp).r;            // 1 = flat, 0 = deep fold
+  // 归一1: z-score fold depth by the in-quad spread (sampleLightStats) so
+  // "depth = 1" is the same fold on a flat tee and a deep-creased shot.
+  // depth = 0 on flat regions ⇒ print bytes unchanged (硬门, no gamma approx).
+  float depth = clamp((1.0 - light) / max(uFoldSpread, 0.02), 0.0, 1.0);
 
   // Foreground occlusion — ML hair only (5-tap max, ~2 px).
   float hair = uHair.eval(mp).r;
@@ -69,8 +74,17 @@ half4 main(float2 fc) {
   hair = max(hair, uHair.eval(mp + float2(0.0, -2.0)).r);
   float occl = 1.0 - hair;
 
-  float effLF = mix(1.0, lightFactor, occl);
-  half3 printed = rgb * mix(1.0, effLF, pa);
+  // 归一2: near-black anti-crush rolloff. max(rgb) is the project's
+  // perceived-darkness metric (navy: low luma, high max). A near-black
+  // pattern pixel gets room→0, so the fold can NEVER crush it to black —
+  // structural, no color branch. The "white prints look dirty" problem is
+  // NOT fixed by attenuating white here (that just CUTS shading — user
+  // wants it NATURAL, not gone); it's fixed upstream by feeding a softened
+  // light map so what lands on white is a gentle gradient, not a hard
+  // bimodal body-shadow blob. uFoldK = SNR-conf × slider × residual.
+  float room = smoothstep(0.0, uBlackMargin, max(max(rgb.r, rgb.g), rgb.b));
+  float mult = 1.0 - depth * uFoldK * room * occl;
+  half3 printed = rgb * mix(1.0, mult, pa);
   half3 comp = mix(photoCol, printed, pa * occl);
 
   half3 outRGB = comp;
@@ -113,16 +127,18 @@ export type CompositeUniforms = {
   tint: number;
   sceneBrightness: number;
   lift: number;
-  lightStrength: number;
+  foldK: number;
   debugMode: number;
   depthWrap: number;
   wrinkleStrength: number;
   shadingP10: number;
   shadingP90: number;
+  foldSpread: number;
+  blackMargin: number;
 };
 
 // Flatten in SkSL declaration order — CanvasKit packs runtime-effect
-// uniforms tightly (float3 = 3 floats, no std140 padding). 19 floats.
+// uniforms tightly (float3 = 3 floats, no std140 padding). 21 floats.
 export function packUniforms(u: CompositeUniforms): Float32Array {
   return new Float32Array([
     u.surfW, u.surfH,
@@ -132,11 +148,13 @@ export function packUniforms(u: CompositeUniforms): Float32Array {
     u.tint,
     u.sceneBrightness,
     u.lift,
-    u.lightStrength,
+    u.foldK,
     u.debugMode,
     u.depthWrap,
     u.wrinkleStrength,
     u.shadingP10,
     u.shadingP90,
+    u.foldSpread,
+    u.blackMargin,
   ]);
 }
