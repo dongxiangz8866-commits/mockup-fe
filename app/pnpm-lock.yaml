@@ -20,6 +20,9 @@ importers:
       '@react-three/fiber':
         specifier: ^8.17.10
         version: 8.18.0(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(three@0.169.0)
+      canvaskit-wasm:
+        specifier: ^0.41.1
+        version: 0.41.1
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -785,6 +788,9 @@ packages:
     peerDependencies:
       vite: ^4.2.0 || ^5.0.0 || ^6.0.0 || ^7.0.0
 
+  '@webgpu/types@0.1.21':
+    resolution: {integrity: sha512-pUrWq3V5PiSGFLeLxoGqReTZmiiXwY3jRkIG5sLLKjyqNxrwm/04b4nw7LSmGWJcKk59XOM/YRTUwOzo4MMlow==}
+
   '@webgpu/types@0.1.69':
     resolution: {integrity: sha512-RPmm6kgRbI8e98zSD3RVACvnuktIja5+yLgDAkTmxLr90BEwdTXRQWNLF3ETTTyH/8mKhznZuN5AveXYFEsMGQ==}
 
@@ -822,6 +828,9 @@ packages:
 
   caniuse-lite@1.0.30001792:
     resolution: {integrity: sha512-hVLMUZFgR4JJ6ACt1uEESvQN1/dBVqPAKY0hgrV70eN3391K6juAfTjKZLKvOMsx8PxA7gsY1/tLMMTcfFLLpw==}
+
+  canvaskit-wasm@0.41.1:
+    resolution: {integrity: sha512-gO2rNMIE0lOQ8MaarM4qNeq2zZAEknAObKP2XAKidMSAY8P5sURGdFkrx1TSdHuBFqTf5w35JqjuUzjibqkD5g==}
 
   convert-source-map@2.0.0:
     resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
@@ -1948,6 +1957,8 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@webgpu/types@0.1.21': {}
+
   '@webgpu/types@0.1.69': {}
 
   adm-zip@0.5.17: {}
@@ -1980,6 +1991,10 @@ snapshots:
       three: 0.169.0
 
   caniuse-lite@1.0.30001792: {}
+
+  canvaskit-wasm@0.41.1:
+    dependencies:
+      '@webgpu/types': 0.1.21
 
   convert-source-map@2.0.0: {}
 

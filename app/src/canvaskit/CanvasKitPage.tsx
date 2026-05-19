@@ -1,0 +1,369 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { detectPoseCached, readCachedPose, type PoseLandmark } from '../poseDetector';
+import {
+  classifyShirt, quadFromLandmarks, sampleGarment, sampleScene,
+  type GarmentSample, type Quad, type SceneSample,
+} from '../shading';
+import ControlRail from '../displace/ControlRail';
+import type { DebugMode } from '../displace/DisplaceCanvas';
+import { deriveMaps, type DerivedMaps } from '../displace/MapPipeline';
+import PatternPicker from '../displace/PatternPicker';
+import PerfPanel from '../displace/PerfPanel';
+import PhotoPicker from '../displace/PhotoPicker';
+import QuadHandles from '../displace/QuadHandles';
+import ResultActions from '../displace/ResultActions';
+import SourcePreview from '../displace/SourcePreview';
+import { sampleDepthStats } from '../displace/depthStats';
+import { recordStage, resetParse } from '../displace/perfBus';
+import { sampleShadingStats } from '../displace/shadingStats';
+import { loadImage } from '../displace/textures';
+import { useClothMask } from '../displace/useClothMask';
+import { useDepthMap } from '../displace/useDepthMap';
+import { useHairMask } from '../displace/useHairMask';
+import { usePerfMetrics } from '../displace/usePerfMetrics';
+import { useQuadDrag } from '../displace/useQuadDrag';
+import CanvasKitStage from './CanvasKitStage';
+import s from '../displace/DisplacePage.module.css';
+
+type LoadState = 'idle' | 'loading' | 'pose' | 'maps' | 'ready' | 'fail';
+
+const garmentMemCache = new Map<string, GarmentSample>();
+const sceneMemCache = new Map<string, SceneSample>();
+
+// /canvaskit-specific light tuning (user spec 2026-05-19; /displace keeps
+// its own — see feedback_displace_autolightstrength_tuning memory):
+//   • black / 深色统一档 (classifyShirt 'black', lumP95<90, 含深蓝) → 0.2
+//   • white / 浅档 → ~1.0
+//   • 'color': perceived-light (淡黄/姜黄/浅蓝, max(R,G,B) 高) → ~1.0;
+//     perceived-dark (深蓝等若够亮落这档) → 0.2. max(R,G,B) is the
+//     project's perceived-darkness metric (navy meanLum low but max high).
+function autoLightStrength(g: GarmentSample): number {
+  const maxRGB = Math.max(g.rgb[0], g.rgb[1], g.rgb[2]);
+  const key = classifyShirt(g);
+  if (key === 'black') return 0.2;
+  if (key === 'white') return 1.0;
+  const t = Math.max(0, Math.min(1, (maxRGB - 100) / 90));
+  return 0.2 + t * 0.8;
+}
+
+export default function CanvasKitPage() {
+  const [photoSrc, setPhotoSrc] = useState<string | null>(null);
+  const [patternSrc, setPatternSrc] = useState<string | null>(null);
+  const [hoverStage, setHoverStage] = useState(false);
+  const [photo, setPhoto] = useState<HTMLImageElement | null>(null);
+  const [patternImg, setPatternImg] = useState<HTMLImageElement | null>(null);
+  const [quad, setQuad] = useState<Quad | null>(null);
+  const [maps, setMaps] = useState<DerivedMaps | null>(null);
+  const [status, setStatus] = useState<LoadState>('idle');
+
+  const [scale, setScale] = useState(1.0);
+  const [light, setLight] = useState(1.0);
+  const [sceneBrightness, setSceneBrightness] = useState(1.0);
+  const [depthWrap, setDepthWrap] = useState(1.0);
+  const [wrinkle, setWrinkle] = useState(0);
+  const [smoothWarp, setSmoothWarp] = useState(0.4);
+  const [debug, setDebug] = useState<DebugMode>('composite');
+  const lift = 0.0;
+  const tint = 0.5;
+
+  useEffect(() => {
+    if (!photoSrc) return;
+    let cancelled = false;
+    (async () => {
+      setStatus('loading');
+      setPhoto(null);
+      setQuad(null);
+      setMaps(null);
+      resetParse(performance.now());
+      try {
+        const tLoad = performance.now();
+        const img = await loadImage(photoSrc);
+        if (cancelled) return;
+        recordStage('load', performance.now() - tLoad, 'compute');
+        setPhoto(img);
+        setStatus('pose');
+        const poseCached = !!readCachedPose(photoSrc);
+        const tPose = performance.now();
+        let lm: PoseLandmark[] | null = null;
+        try {
+          lm = await detectPoseCached(img, photoSrc);
+        } catch (e) {
+          console.warn('[canvaskit] pose fail', e);
+        }
+        if (cancelled) return;
+        recordStage('pose', performance.now() - tPose, poseCached ? 'localStorage' : 'compute');
+        const q = lm ? quadFromLandmarks(lm, img.naturalWidth, img.naturalHeight) : null;
+        setQuad(q);
+        setStatus('maps');
+        const tMaps = performance.now();
+        const derived = await deriveMaps(img, q, photoSrc);
+        if (cancelled) return;
+        recordStage('maps', performance.now() - tMaps, 'compute');
+        setMaps(derived);
+        setStatus(q ? 'ready' : 'fail');
+      } catch (e) {
+        console.warn('[canvaskit]', e);
+        if (!cancelled) setStatus('fail');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [photoSrc]);
+
+  useEffect(() => {
+    if (!patternSrc) { setPatternImg(null); return; }
+    let cancelled = false;
+    loadImage(patternSrc)
+      .then((img) => !cancelled && setPatternImg(img))
+      .catch((e) => console.warn('[canvaskit] pattern load fail', e));
+    return () => { cancelled = true; };
+  }, [patternSrc]);
+
+  const depthResult = useDepthMap(photo, photoSrc);
+  const hairResult = useHairMask(photo, photoSrc);
+  const clothResult = useClothMask(photo, photoSrc);
+
+  const photoSize = useMemo(
+    () => (photo ? { w: photo.naturalWidth, h: photo.naturalHeight } : null),
+    [photo]
+  );
+  const aspect = photoSize ? photoSize.w / photoSize.h : 0.667;
+  const patternAspect = useMemo(
+    () => (patternImg ? patternImg.naturalWidth / patternImg.naturalHeight : 1.0),
+    [patternImg]
+  );
+
+  const scaledQuad = useMemo<Quad | null>(() => {
+    if (!quad) return null;
+    const cx = (quad.tl.x + quad.tr.x + quad.bl.x + quad.br.x) / 4;
+    const cy = (quad.tl.y + quad.tr.y + quad.bl.y + quad.br.y) / 4;
+    const f = (pt: { x: number; y: number }) => ({ x: cx + (pt.x - cx) * scale, y: cy + (pt.y - cy) * scale });
+    return { tl: f(quad.tl), tr: f(quad.tr), bl: f(quad.bl), br: f(quad.br) };
+  }, [quad, scale]);
+
+  const printCenterUV = useMemo<[number, number]>(() => {
+    if (!scaledQuad || !photoSize) return [0.5, 0.5];
+    const cx = (scaledQuad.tl.x + scaledQuad.tr.x + scaledQuad.bl.x + scaledQuad.br.x) / 4 / photoSize.w;
+    const cy = (scaledQuad.tl.y + scaledQuad.tr.y + scaledQuad.bl.y + scaledQuad.br.y) / 4 / photoSize.h;
+    return [cx, cy];
+  }, [scaledQuad, photoSize]);
+
+  const depthStats = useMemo(
+    () => (depthResult.depth ? sampleDepthStats(depthResult.depth, scaledQuad) : { center: 0.5, range: 0.08 }),
+    [depthResult.depth, scaledQuad]
+  );
+  const smoothCenter = useMemo(
+    () => (maps?.smooth ? sampleDepthStats(maps.smooth, scaledQuad).center : 0.0),
+    [maps, scaledQuad]
+  );
+  const shadingStats = useMemo(
+    () => (maps?.shading ? sampleShadingStats(maps.shading, quad) : { p10: 0.35, p90: 0.5, autoScale: 1.0 }),
+    [maps, quad]
+  );
+
+  const garment: GarmentSample | null = useMemo(() => {
+    if (!photo || !quad || !photoSrc) return null;
+    const c = garmentMemCache.get(photoSrc);
+    if (c) return c;
+    const fresh = sampleGarment(photo, quad);
+    garmentMemCache.set(photoSrc, fresh);
+    return fresh;
+  }, [photo, quad, photoSrc]);
+
+  const sceneSample: SceneSample | null = useMemo(() => {
+    if (!photo || !photoSrc) return null;
+    const c = sceneMemCache.get(photoSrc);
+    if (c) return c;
+    const fresh = sampleScene(photo, quad);
+    sceneMemCache.set(photoSrc, fresh);
+    return fresh;
+  }, [photo, photoSrc, quad]);
+
+  const envRGB = useMemo<[number, number, number]>(
+    () => (sceneSample ? [sceneSample.rgb[0] / 255, sceneSample.rgb[1] / 255, sceneSample.rgb[2] / 255] : [0.5, 0.5, 0.5]),
+    [sceneSample]
+  );
+  const garmentRGB = useMemo<[number, number, number]>(
+    () => (garment ? [garment.rgb[0] / 255, garment.rgb[1] / 255, garment.rgb[2] / 255] : [0.5, 0.5, 0.5]),
+    [garment]
+  );
+  const wrinkleDarkBoost = useMemo(() => {
+    if (!garment) return 1.0;
+    const maxRGB = Math.max(garment.rgb[0], garment.rgb[1], garment.rgb[2]);
+    return 1.7 + Math.max(0, Math.min(1, (maxRGB - 40) / 140)) * (0.4 - 1.7);
+  }, [garment]);
+
+  useEffect(() => {
+    if (garment) setLight(autoLightStrength(garment));
+  }, [garment]);
+
+  const drag = useQuadDrag(quad, setQuad, photoSize);
+  const perf = usePerfMetrics(drag.dragging);
+
+  const stageRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      const dir = e.deltaY < 0 ? 1 : -1;
+      setScale((v) => Math.max(0.4, Math.min(3, v * (1 + dir * 0.05))));
+    };
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, []);
+  const getCanvas = useCallback(() => stageRef.current?.querySelector('canvas') ?? null, []);
+
+  const ready =
+    status === 'ready' && !!photo && !!patternImg && !!photoSize && !!scaledQuad &&
+    !!maps && depthResult.state === 'ready' && !!depthResult.depth && !!depthResult.depthFine;
+
+  const failed = status === 'fail';
+  const parsing = status === 'loading' || status === 'pose' || status === 'maps';
+  const awaitingPattern = status === 'ready' && !patternSrc;
+  const applyingPattern = status === 'ready' && !!patternSrc && !ready;
+  const spinnerText = parsing
+    ? status === 'loading' ? '加载图片…' : status === 'pose' ? '识别人体姿态…' : '派生光影 + 位移图…'
+    : '应用图案…';
+  const stepIndex = status === 'loading' ? 0 : status === 'pose' ? 1 : 2;
+
+  const pickPhoto = (src: string) => {
+    setPhoto(null);
+    setQuad(null);
+    setMaps(null);
+    setPhotoSrc(src);
+  };
+
+  return (
+    <main
+      className={s.page}
+      data-ck-status={status}
+      data-depth-state={depthResult.state}
+      data-hair-state={hairResult.state}
+      data-cloth-state={clothResult.state}
+      data-photo-src={photoSrc ?? ''}
+    >
+      <header className={s.topbar}>
+        <div className={s.pickerCol}><PhotoPicker current={photoSrc} onPick={pickPhoto} /></div>
+        <div className={s.pickerCol}><PatternPicker current={patternSrc} onPick={setPatternSrc} /></div>
+      </header>
+
+      <div className={s.workspace}>
+        <aside className={s.leftRail}>
+          <SourcePreview photoSrc={photoSrc} patternSrc={patternSrc} />
+        </aside>
+
+        <div className={s.stage}>
+          {!photoSrc && <div className={s.empty}>选个模特图开始</div>}
+          {photoSrc && !ready && failed && (
+            <div className={`${s.loadingText} ${s.loadingFail}`}>未识别到人体</div>
+          )}
+          {photoSrc && !ready && !failed && awaitingPattern && (
+            <div className={s.empty}>模特图已就绪 · 选一张图案</div>
+          )}
+          {photoSrc && !ready && !failed && (parsing || applyingPattern) && (
+            <div className={s.loading}>
+              <div className={s.spinner} aria-hidden />
+              <div className={s.loadingText}>{spinnerText}</div>
+              {parsing && (
+                <div className={s.steps}>
+                  {['加载', '姿态', '光影'].map((label, i) => (
+                    <span
+                      key={label}
+                      className={`${s.step} ${i < stepIndex ? s.stepDone : ''} ${i === stepIndex ? s.stepActive : ''}`}
+                    >
+                      {label}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {ready && (
+            <div
+              ref={stageRef}
+              className={s.canvasFrame}
+              style={{ aspectRatio: `${aspect}`, cursor: drag.dragging ? 'grabbing' : 'grab' }}
+              onPointerDown={drag.onPointerDown}
+              onPointerMove={drag.onPointerMove}
+              onPointerUp={drag.onPointerUp}
+              onPointerCancel={drag.onPointerUp}
+              onPointerEnter={() => setHoverStage(true)}
+              onPointerLeave={() => setHoverStage(false)}
+            >
+              <CanvasKitStage
+                photo={photo!}
+                patternImg={patternImg!}
+                quad={scaledQuad!}
+                photoSize={photoSize!}
+                macroCanvas={depthResult.depth!}
+                smoothCanvas={maps!.smooth}
+                shadingCanvas={maps!.shading}
+                lightCanvas={maps!.light}
+                fineCanvas={depthResult.depthFine!}
+                hairCanvas={hairResult.hair}
+                clothCanvas={clothResult.cloth}
+                patternAspect={patternAspect}
+                strength={1.0}
+                dispSign={1}
+                depthWrap={depthResult.depth ? depthWrap : 0}
+                wrinkleStrength={maps ? wrinkle * shadingStats.autoScale * wrinkleDarkBoost : 0}
+                smoothWarp={maps?.smooth ? smoothWarp : 0}
+                smoothCenter={smoothCenter}
+                zCenter={depthStats.center}
+                shadingP10={shadingStats.p10}
+                shadingP90={shadingStats.p90}
+                printCenterUV={printCenterUV}
+                envRGB={envRGB}
+                garmentRGB={garmentRGB}
+                tint={tint}
+                sceneBrightness={sceneBrightness}
+                lift={lift}
+                lightStrength={light}
+                debugMode={debug}
+                renderKey={`${photoSrc ?? ''}|${patternSrc ?? ''}`}
+              />
+              {quad && (
+                <div className={`${s.handles} ${hoverStage || drag.dragging ? s.handlesShown : ''}`}>
+                  <QuadHandles
+                    quad={quad}
+                    scaledQuad={scaledQuad!}
+                    photoSize={photoSize!}
+                    scale={scale}
+                    setScale={setScale}
+                  />
+                </div>
+              )}
+              {quad && !hoverStage && !drag.dragging && (
+                <div className={s.editHint}>悬停可编辑印图</div>
+              )}
+              <ResultActions getCanvas={getCanvas} />
+            </div>
+          )}
+        </div>
+
+        <aside className={s.rail}>
+          <ControlRail
+            scale={scale}
+            setScale={setScale}
+            light={light}
+            setLight={setLight}
+            sceneBrightness={sceneBrightness}
+            setSceneBrightness={setSceneBrightness}
+            depthWrap={depthWrap}
+            setDepthWrap={setDepthWrap}
+            depthEnabled={!!depthResult.depth}
+            wrinkle={wrinkle}
+            setWrinkle={setWrinkle}
+            wrinkleEnabled={!!maps}
+            smooth={smoothWarp}
+            setSmooth={setSmoothWarp}
+            smoothEnabled={!!maps?.smooth}
+            debug={debug}
+            setDebug={setDebug}
+          />
+          <PerfPanel metrics={perf} />
+        </aside>
+      </div>
+    </main>
+  );
+}
