@@ -209,6 +209,8 @@ export const frag = /* glsl */ `
   uniform float uSceneBrightness;
   uniform float uLift;
   uniform float uLightStrength;
+  uniform float uSmoothCenter;   // print-center sample of uSmoothField (CPU)
+  uniform float uSmoothLight;    // black-shirt broad-shading strength (0 = off)
   uniform vec2  uPhotoSize;
   uniform vec2  uQuadTL;
   uniform vec2  uQuadTR;
@@ -291,8 +293,43 @@ export const frag = /* glsl */ `
     // Pattern brightness / floor model — unchanged.
     vec3 rgb = patCol.rgb * uSceneBrightness;
     rgb = rgb * (1.0 - uLift) + vec3(uLift);
+    // Fold lighting (2026-05-19, r3). User intent: ONLY genuine folds may
+    // darken the print; flat / softly-lit cloth must leave the ink
+    // byte-unchanged, and white-heavy artwork should pick up far less fold
+    // shading than saturated ink (a gray smudge reads far worse on white
+    // than on red).
+    //   • smoothstep(0.15,0.70) is a hard fold gate: anything below a real
+    //     fold — sensor wobble, the broad studio-light falloff the wide-DoG
+    //     still leaks — returns EXACTLY 0, so lightFactor is EXACTLY 1.0
+    //     and those pixels are byte-unchanged ("别的地方的颜色不要变").
+    //   • whiteScale fades the whole effect out as the ink nears white
+    //     (luma 0.60→0.95), scaling BOTH the darkening and the safety floor
+    //     so a white logo barely shades in folds while red ink still does.
     float light = texture2D(uLight, puv).r;
-    float lightFactor = mix(1.0, light, uLightStrength);
+    float fold = smoothstep(0.15, 0.70, 1.0 - light);
+    float patLuma = dot(patCol.rgb, vec3(0.299, 0.587, 0.114));
+    float whiteScale = mix(1.0, 0.40, smoothstep(0.60, 0.95, patLuma));
+    float lightFactor = max(
+      1.0 - fold * uLightStrength * whiteScale,
+      1.0 - (1.0 - 0.38) * whiteScale
+    );
+
+    // BROAD-SHADING CONFORM — black shirts only (2026-05-19). The DoG uLight
+    // map is unusable on black: A1 over-amplifies near-black cloth into noise
+    // (see autoLightStrength), so black runs uLightStrength=0 and the block
+    // above leaves lightFactor=1.0 — the print then floated like a sticker.
+    // Re-integrate from the ONE clean signal we have: uSmoothField is a ~95px
+    // pure low-pass, structurally speckle-free. Self-normalize by the print-
+    // center sample so the center is byte-unchanged and only regions the
+    // shirt's broad shading puts BELOW center (under-bust, sides, sleeve
+    // falloff) darken; brighter-than-center never lightens (only-darken
+    // design). whiteScale keeps white-heavy art from smudging. uSmoothLight=0
+    // on white/color ⇒ smoothFactor≡1.0 and their fold-only DoG path above is
+    // byte-identical (recorded fold_only_lighting constraint preserved).
+    float sm = texture2D(uSmoothField, puv).r;
+    float relLight = clamp(sm / max(uSmoothCenter, 0.01), 0.0, 1.0);
+    float smoothFactor = max(1.0 - (1.0 - relLight) * uSmoothLight * whiteScale, 0.45);
+    lightFactor *= smoothFactor;
 
     vec4 photoCol = texture2D(uPhoto, puv);
 
@@ -370,6 +407,7 @@ export type DisplaceUniforms = {
   uSceneBrightness: { value: number };
   uLift: { value: number };
   uLightStrength: { value: number };
+  uSmoothLight: { value: number };
   uPhotoSize: { value: THREE.Vector2 };
   uQuadTL: { value: THREE.Vector2 };
   uQuadTR: { value: THREE.Vector2 };
@@ -408,6 +446,7 @@ export function makeUniforms(): DisplaceUniforms {
     uSceneBrightness: { value: 1.0 },
     uLift: { value: 0.0 },
     uLightStrength: { value: 1.0 },
+    uSmoothLight: { value: 0.0 },
     uPhotoSize: { value: new THREE.Vector2(1, 1) },
     uQuadTL: { value: new THREE.Vector2(0, 0) },
     uQuadTR: { value: new THREE.Vector2(1, 0) },

@@ -48,6 +48,7 @@ type Props = {
   sceneBrightness: number;
   lift: number;
   lightStrength: number;
+  smoothLight: number;
   debugMode: DebugMode;
   // Changes whenever photo OR pattern changes — the render probe times from
   // here to the next painted frame ("印图渲染耗时") and samples renderer.info.
@@ -197,6 +198,10 @@ export default function DisplaceCanvas(p: Props) {
   useEffect(() => {
     uniforms.uLightStrength.value = p.lightStrength;
   }, [uniforms, p.lightStrength]);
+
+  useEffect(() => {
+    uniforms.uSmoothLight.value = p.smoothLight;
+  }, [uniforms, p.smoothLight]);
 
   useEffect(() => {
     uniforms.uDebugMode.value = debugModeIndex[p.debugMode];

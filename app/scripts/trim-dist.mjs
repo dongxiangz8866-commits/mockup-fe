@@ -13,7 +13,7 @@
 // (it skips `_`-prefixed entries and non-image files) — e.g. test-models/
 // _rejected/ (~86MB of discarded shots) and the stale MANIFEST.json.
 
-import { rm, stat, readdir, writeFile } from 'node:fs/promises';
+import { rm, stat, readdir, writeFile, readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,6 +27,20 @@ const SURGE_DOMAIN = 'yangji-mockup.surge.sh';
 const DROP = ['models', 'mock-models', 'sweatshirt.glb'];
 const PICKER_DIRS = ['test-models', 'test-patterns'];
 const SERVABLE = /\.(png|jpe?g|webp|svg)$/i;
+
+// Vite bakes VITE_ASSET_CDN into the bundle from .env.production, but this
+// node postbuild step doesn't get Vite's env loading — read the same file
+// so "set it once in .env.production" stays the single source of truth.
+async function cdnEnabled() {
+  if (process.env.VITE_ASSET_CDN) return true;
+  try {
+    const env = await readFile(resolve(DIST, '..', '.env.production'), 'utf8');
+    return /^\s*VITE_ASSET_CDN\s*=\s*\S/m.test(env);
+  } catch {
+    return false;
+  }
+}
+const CDN_ON = await cdnEnabled();
 
 async function dirSize(p) {
   let entries;
@@ -77,7 +91,19 @@ for (const name of DROP) {
   await rm(target, { recursive: true, force: true });
   console.log(`[trim-dist] removed dist/${name}`);
 }
-for (const d of PICKER_DIRS) await dropInside(d);
+// With VITE_ASSET_CDN the picker fetches these from the CDN, so the deploy
+// origin must not also carry them — drop the dirs whole. Without it, keep
+// the in-place prune so a CDN-less deploy still serves the assets.
+if (CDN_ON) {
+  for (const d of PICKER_DIRS) {
+    const target = resolve(DIST, d);
+    if (!target.startsWith(DIST)) continue; // path guard
+    await rm(target, { recursive: true, force: true });
+    console.log(`[trim-dist] removed dist/${d} (served from CDN)`);
+  }
+} else {
+  for (const d of PICKER_DIRS) await dropInside(d);
+}
 if (!process.env.GITHUB_ACTIONS) {
   await writeFile(resolve(DIST, 'CNAME'), SURGE_DOMAIN);
   console.log(`[trim-dist] wrote dist/CNAME = ${SURGE_DOMAIN}`);

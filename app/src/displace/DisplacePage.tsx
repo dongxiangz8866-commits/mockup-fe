@@ -43,11 +43,15 @@ const garmentMemCache = new Map<string, GarmentSample>();
 // not change as the user drags the print around. Keyed by photoSrc only.
 const sceneMemCache = new Map<string, SceneSample>();
 
+// Black-shirt broad-shading strength (uSmoothLight). The DoG fold-light is
+// off on black (autoLightStrength → 0, the map is A1 noise); this drives the
+// print's only conform signal from the clean smooth field instead. Moderate
+// default — tune by eye, white/color keep 0 (fold-only path untouched).
+const SMOOTH_LIGHT_BLACK = 0.5;
+
 function autoLightStrength(garment: GarmentSample): number {
   const [r, g, b] = garment.rgb;
   const maxRGB = Math.max(r, g, b);
-  const minRGB = Math.min(r, g, b);
-  const sat = maxRGB > 0 ? (maxRGB - minRGB) / maxRGB : 0;
   const key = classifyShirt(garment);
   // 越白越大 / 越黑越小. The light map is the DoG fold map, not raw shirt
   // luminance — but on dark cloth buildShadingMap's FLOOR=40 amplifies
@@ -61,18 +65,29 @@ function autoLightStrength(garment: GarmentSample): number {
     return 1.0 + t * 0.5;
   }
   if (key === 'black') {
-    // near-black (maxRGB→0) → 0 (print stays true color, no spurious dim)
-    // … dark-but-not-black (maxRGB≈90) → 0.55
-    const t = Math.max(0, Math.min(1, maxRGB / 90));
-    return t * 0.55;
+    // 2026-05-19, debug-confirmed (光照 debug view): on a black shirt A1
+    // stretches the near-black, near-info-free cloth ~9× into a high-contrast
+    // noise field, so buildShadingMap's wide DoG marks the WHOLE garment as
+    // spurious "deep folds". The light map is unusable, not just noisy — any
+    // non-zero strength multiplies that garbage onto the print (the 斑驳 the
+    // user reported). Fold-light OFF on black → print byte-unchanged, the
+    // only honest call until A1 over-amplification is fixed at the root
+    // (root fix is cross-route + 3 cache bumps — deliberately deferred).
+    // The earlier +0.5→+0.05→+0.02 ramp was tuning a garbage map.
+    return 0.0;
   }
 
-  // Saturated shirts have low luminance in BT.601 even when visually bright
-  // (red is the obvious case). Keep their multiply-light contribution weak
-  // so shadows shape the print without crushing the artwork.
-  const vivid = Math.max(0, Math.min(1, (sat - 0.20) / 0.45));
-  const brightColor = Math.max(0, Math.min(1, (maxRGB - 100) / 120));
-  return 0.45 + (0.18 - 0.45) * vivid * brightColor;
+  // Saturated colored shirts (the 'color' preset — neither white nor dark).
+  // 2026-05-19: flipped to the same perceived-brightness direction as the
+  // white/black branches — dark variants get less light, light variants
+  // more. The old inversion (weak light on bright color) only guarded
+  // against crushing bright saturated artwork; the shader's 0.38 fold
+  // floor now does that, so the guard is gone. maxRGB (not BT.601 luma)
+  // is the project's perceived-darkness metric, so a bright-but-low-luma
+  // saturated red still reads as "light" and gets the stronger light.
+  // 深红/深蓝/深黄 (maxRGB≈110) → ~0.25  …  浅红/浅蓝/浅黄 (maxRGB≈230) → ~0.85
+  const t = Math.max(0, Math.min(1, (maxRGB - 110) / 120));
+  return 0.25 + t * 0.60;
 }
 
 export default function DisplacePage() {
@@ -90,6 +105,7 @@ export default function DisplacePage() {
 
   const [scale, setScale] = useState(1.0);
   const [light, setLightStrength] = useState(1.0);
+  const [smoothLight, setSmoothLight] = useState(0);
   const [sceneBrightness, setSceneBrightness] = useState(1.0);
   // lift kept at 0 by request — sceneBrightness alone is enough for
   // black-shirt patterns once shadow modulation is reasonable. Slider
@@ -112,11 +128,13 @@ export default function DisplacePage() {
   // still there to raise it on shirts with genuine drape.
   const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(0);
   // 2026-05-19 user idea: write a low-pass fold field INTO the depth z and
-  // reuse the proven absolute-radial-drop cylinder wrap. User evaluated it
-  // and set the default to 1 (full, on by default) — so it now affects every
-  // photo. On a flat studio front-T the field is ~flat ⇒ negligible effect
-  // (signal isn't in the pixels); on real drape it's the bumpy-cylinder wrap.
-  const [smoothWarp, setSmoothWarp] = useState(1);
+  // reuse the proven absolute-radial-drop cylinder wrap. 2026-05-19: user
+  // dialed the default 1 → 0.4 (on by default but calmer) — full strength
+  // over-warped the print outline on real drape. On a flat studio front-T
+  // the field is ~flat ⇒ negligible effect regardless (signal isn't in the
+  // pixels — this is why an even-lit studio shot looks "没变"); on real drape
+  // it's the bumpy-cylinder wrap at the gentler 0.4 baseline.
+  const [smoothWarp, setSmoothWarp] = useState(0.4);
 
   // Photo + pose + maps pipeline.
   useEffect(() => {
@@ -422,8 +440,10 @@ export default function DisplacePage() {
     const meanLum = garment.rgb[0] * 0.299 + garment.rgb[1] * 0.587 + garment.rgb[2] * 0.114;
     const ls = autoLightStrength(garment);
     const maxRGB = Math.max(garment.rgb[0], garment.rgb[1], garment.rgb[2]);
-    console.log(`[overlap] garmentMeanLum=${meanLum.toFixed(0)} maxRGB=${maxRGB.toFixed(0)} → lightStrength=${ls.toFixed(2)}`);
+    const sl = classifyShirt(garment) === 'black' ? SMOOTH_LIGHT_BLACK : 0;
+    console.log(`[overlap] garmentMeanLum=${meanLum.toFixed(0)} maxRGB=${maxRGB.toFixed(0)} → lightStrength=${ls.toFixed(2)} smoothLight=${sl}`);
     setLightStrength(ls);
+    setSmoothLight(sl);
   }, [garment]);
 
   // Debug: log env signal so we can tell whether 色彩融合 is gated off
@@ -591,6 +611,7 @@ export default function DisplacePage() {
                 sceneBrightness={sceneBrightness}
                 lift={lift}
                 lightStrength={light}
+                smoothLight={smoothLight}
                 debugMode={debug}
                 renderKey={`${photoSrc ?? ''}|${patternSrc ?? ''}`}
               />

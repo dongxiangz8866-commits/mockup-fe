@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
-  <rect width="1200" height="1200" fill="none"/>
-  <g font-family="'Brush Script MT', 'Lucida Handwriting', cursive" fill="#1a1a1a" text-anchor="middle">
-    <text x="600" y="430" font-size="160" font-weight="400" font-style="italic">good things</text>
-    <text x="600" y="600" font-size="220" font-weight="700" font-style="italic">take time.</text>
-    <text x="600" y="780" font-size="80" font-weight="400" letter-spacing="12" font-family="Helvetica, Arial, sans-serif">— EST. 2026 —</text>
-  </g>
-  <path d="M340 660Q600 720 860 660" stroke="#1a1a1a" stroke-width="6" fill="none" stroke-linecap="round"/>
-</svg>

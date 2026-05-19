@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
-  <rect width="1200" height="1200" fill="none"/>
-  <circle cx="600" cy="600" r="320" fill="none" stroke="#101010" stroke-width="32"/>
-  <circle cx="600" cy="600" r="200" fill="#101010"/>
-  <path d="M520 540L680 540L600 700Z" fill="#ffffff"/>
-  <g font-family="Helvetica, Arial, sans-serif" fill="#101010" font-weight="900" letter-spacing="8">
-    <text x="600" y="990" text-anchor="middle" font-size="58">MEMEBUY</text>
-  </g>
-</svg>

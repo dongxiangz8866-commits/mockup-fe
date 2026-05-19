@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "postbuild": "node scripts/trim-dist.mjs",
+    "compress": "node scripts/compress-assets.mjs",
     "deploy:surge": "pnpm build && surge dist yangji-mockup.surge.sh",
     "preview": "vite preview",
     "screenshot": "node scripts/screenshot-thumbs.mjs",
@@ -30,6 +31,7 @@
     "@types/three": "^0.169.0",
     "@vitejs/plugin-react": "^4.3.3",
     "playwright": "^1.59.1",
+    "sharp": "^0.34.5",
     "typescript": "^5.6.3",
     "vite": "^5.4.10"
   }
