@@ -37,7 +37,7 @@ export default function QuadHandles({
   scale,
   setScale,
   min = 0.4,
-  max = 2.0,
+  max = 3,
 }: Props) {
   const resizeRef = useRef<ResizeStart | null>(null);
   const handleR = photoSize.w / 60;

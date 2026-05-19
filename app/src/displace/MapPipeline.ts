@@ -10,6 +10,7 @@ import {
 
 const LIGHT_CACHE_PREFIX = 'light-cache:v1:';
 const DISPLACE_CACHE_PREFIX = 'disp-cache:v2:';
+const SMOOTH_CACHE_PREFIX = 'smooth-cache:v1:';
 
 // The wide-band DoG (10% big-blur) catches 30–80 px folds — exactly the
 // scale that reads as "displaceable cloth fold" to the eye. Narrow (5%)
@@ -114,6 +115,47 @@ export function buildDisplaceMap(shading: HTMLCanvasElement): HTMLCanvasElement 
   return out;
 }
 
+// PURE heavy low-pass of the photo luma — the "wrinkle field written into
+// depth" source (2026-05-19, v2 of the smooth-field idea). Deliberately NOT
+// buildShadingMap: that is a band-PASS (DoG) keeping the mid-freq dye/weave
+// that historically sliced letters as a warp source. A single ~8% Gaussian
+// keeps ONLY the fold-scale macro light-dark, so the field is globally smooth
+// the same way the DAv2 depth map is — which is the whole point: it gets
+// ADDED into the depth z and consumed by the already-working absolute-radial-
+// drop cylinder wrap (value, not gradient — the operator the user confirmed
+// works), so a bright crest reads as "closer" and a dark fold as "receding".
+// Built from the A1-preprocessed `input` (the model photo, BEFORE our print
+// composite) so the print's own edges never enter the field.
+export function buildSmoothField(
+  input: ShadingInput,
+  w: number,
+  h: number
+): HTMLCanvasElement {
+  const radius = Math.max(40, Math.round(Math.min(w, h) * 0.08));
+  const blurC = document.createElement('canvas');
+  blurC.width = w;
+  blurC.height = h;
+  const bctx = blurC.getContext('2d')!;
+  bctx.filter = `blur(${radius}px)`;
+  bctx.drawImage(input, 0, 0);
+  const src = bctx.getImageData(0, 0, w, h).data;
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const octx = out.getContext('2d')!;
+  const od = octx.createImageData(w, h);
+  const dd = od.data;
+  for (let i = 0; i < src.length; i += 4) {
+    const l = Math.round(src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114);
+    dd[i] = l;
+    dd[i + 1] = l;
+    dd[i + 2] = l;
+    dd[i + 3] = 255;
+  }
+  octx.putImageData(od, 0, 0);
+  return out;
+}
+
 // Build (or hydrate from cache) the wide DoG → light + displace pair for
 // `photo` against `quad`. Pose-quad is needed only for the A1 dark-shirt
 // luminance stretch inside `preprocessForShading`; if quad is null the
@@ -123,6 +165,8 @@ export type DerivedMaps = {
   displace: HTMLCanvasElement;
   /** The wide DoG used as input to both — useful for the debug view. */
   shading: HTMLCanvasElement;
+  /** Pure-low-pass field added into depth z for the cylinder fold wrap. */
+  smooth: HTMLCanvasElement;
 };
 
 export async function deriveMaps(
@@ -156,5 +200,14 @@ export async function deriveMaps(
     saveCachedMap(DISPLACE_CACHE_PREFIX, cacheKey, displace);
   }
 
-  return { light, displace, shading };
+  let smooth: HTMLCanvasElement;
+  const cachedSmooth = loadCachedMap(SMOOTH_CACHE_PREFIX, cacheKey);
+  if (cachedSmooth) {
+    smooth = await decodeCachedMap(cachedSmooth, w, h);
+  } else {
+    smooth = buildSmoothField(input, w, h);
+    saveCachedMap(SMOOTH_CACHE_PREFIX, cacheKey, smooth);
+  }
+
+  return { light, displace, shading, smooth };
 }

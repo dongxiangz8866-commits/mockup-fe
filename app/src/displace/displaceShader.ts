@@ -40,12 +40,18 @@ export const vert = /* glsl */ `
 
   uniform sampler2D uDisplace;
   uniform sampler2D uShading;
+  uniform sampler2D uSmoothField;
   uniform sampler2D uPhoto;
 
   uniform float uStrength;
   uniform float uDispSign;
   uniform float uDepthWrap;
   uniform float uWrinkleStrength;
+  // Low-pass fold field ADDED into the depth z (CPU sample at print center
+  // = uSmoothCenter, analogous to uZCenter). 0 ⇒ no z perturbation ⇒ the
+  // cylinder wrap math is byte-identical to before this experiment.
+  uniform float uSmoothWarp;
+  uniform float uSmoothCenter;
   uniform vec2  uPrintCenterUV;
   uniform float uZCenter;
   uniform vec3  uGarmentRGB;
@@ -97,8 +103,22 @@ export const vert = /* glsl */ `
       // Outward push proportional to local depth drop and distance from
       // print center; same math as the old per-fragment version, just
       // evaluated at vertex granularity now.
-      float zHere = dispCol.r;
-      float drop = clamp((uZCenter - zHere) / max(uZCenter, 0.01), 0.0, 1.0);
+      // FOLD-INTO-DEPTH (2026-05-19 user idea). Write the low-pass fold
+      // field straight into the depth z and let the SAME proven absolute-
+      // radial-drop cylinder wrap consume it — value injection, NOT a
+      // gradient and NOT a separate shading push (the operators that all
+      // failed). z' = z + k·w on BOTH the sampled z and the print-center
+      // reference, so drop' = (z'_center − z'_here)/z'_center is exactly
+      // the user's "treat the wrinkle as extra depth". A bright crest
+      // (high w) → higher z' → smaller drop → less outward push; a dark
+      // fold (low w) → more drop → print compresses into it. No cloth-mask
+      // gate on purpose: the warp must stay globally smooth (the sealed
+      // "never modulate displacement by a non-smooth signal" rule) — the
+      // 8% low-pass is what keeps z' smooth across the garment edge, the
+      // same way DAv2 depth is smooth. uSmoothWarp=0 ⇒ z'=z ⇒ unchanged.
+      float zHere = dispCol.r + uSmoothWarp * texture2D(uSmoothField, puv).r;
+      float zCenterEff = uZCenter + uSmoothWarp * uSmoothCenter;
+      float drop = clamp((zCenterEff - zHere) / max(zCenterEff, 0.01), 0.0, 1.0);
       vec2 fromCenter = puv - uPrintCenterUV;
       // The warp field MUST stay globally smooth. Do NOT modulate this
       // displacement by the cloth mask: B3 multiplied it by per-vertex
@@ -177,6 +197,7 @@ export const frag = /* glsl */ `
   uniform sampler2D uWrinkleDisplace;
   uniform sampler2D uLight;
   uniform sampler2D uShading;
+  uniform sampler2D uSmoothField;
   uniform sampler2D uHairMask;
   uniform sampler2D uClothMask;    // garment mask (R=1 cloth) — B-route warp/relight gate
 
@@ -314,6 +335,7 @@ export const frag = /* glsl */ `
       outRGB = vec3(strengthDbg);
     }
     else if (uDebugMode == 6) outRGB = vec3(texture2D(uClothMask, puv).r);
+    else if (uDebugMode == 7) outRGB = vec3(texture2D(uSmoothField, puv).r);
 
     gl_FragColor = vec4(outRGB, 1.0);
   }
@@ -326,12 +348,15 @@ export type DisplaceUniforms = {
   uWrinkleDisplace: { value: THREE.Texture | null };
   uLight: { value: THREE.Texture | null };
   uShading: { value: THREE.Texture | null };
+  uSmoothField: { value: THREE.Texture | null };
   uHairMask: { value: THREE.Texture | null };
   uClothMask: { value: THREE.Texture | null };
   uStrength: { value: number };
   uDispSign: { value: number };
   uDepthWrap: { value: number };
   uWrinkleStrength: { value: number };
+  uSmoothWarp: { value: number };
+  uSmoothCenter: { value: number };
   uShadingP10: { value: number };
   uShadingP90: { value: number };
   uPrintCenterUV: { value: THREE.Vector2 };
@@ -361,12 +386,15 @@ export function makeUniforms(): DisplaceUniforms {
     uWrinkleDisplace: { value: null },
     uLight: { value: null },
     uShading: { value: null },
+    uSmoothField: { value: null },
     uHairMask: { value: null },
     uClothMask: { value: null },
     uStrength: { value: 1.0 },
     uDispSign: { value: 1.0 },
     uDepthWrap: { value: 0.0 },
     uWrinkleStrength: { value: 1.0 },
+    uSmoothWarp: { value: 0.0 },
+    uSmoothCenter: { value: 0.0 },
     uShadingP10: { value: 0.35 },
     uShadingP90: { value: 0.50 },
     uPrintCenterUV: { value: new THREE.Vector2(0.5, 0.5) },

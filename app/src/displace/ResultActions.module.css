@@ -1,0 +1,52 @@
+/* Overlaid top-right INSIDE the result frame (canvasFrame is position:
+   relative). Sits above the WebGL canvas; pointerdown is stopped in the
+   component so clicking a button never starts a print drag. */
+.bar {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 3;
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  appearance: none;
+  padding: 5px 16px;
+  border-radius: 7px;
+  background: #ffffff;
+  border: 1px solid #dcdfe4;
+  color: #374151;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+
+.btn:hover {
+  border-color: #4f46e5;
+  background: #f5f6ff;
+  color: #312e81;
+}
+
+/* Full-viewport view at the canvas's native resolution; click anywhere
+   dismisses (cursor: zoom-out signals it). */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 9, 12, 0.86);
+  cursor: zoom-out;
+  padding: 24px;
+}
+
+.lightboxImg {
+  max-width: 96vw;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+}

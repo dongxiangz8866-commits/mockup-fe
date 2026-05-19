@@ -19,6 +19,7 @@ export type DisplaceTextures = {
   displaceTex: THREE.Texture | null;
   lightTex: THREE.Texture | null;
   shadingTex: THREE.Texture | null;
+  smoothTex: THREE.Texture | null;
 };
 
 export function useDisplaceTextures(
@@ -34,12 +35,14 @@ export function useDisplaceTextures(
   const displaceTex = useMemo(() => (maps ? dataCanvasToTexture(maps.displace) : null), [maps]);
   const lightTex = useMemo(() => (maps ? dataCanvasToTexture(maps.light) : null), [maps]);
   const shadingTex = useMemo(() => (maps ? dataCanvasToTexture(maps.shading) : null), [maps]);
+  const smoothTex = useMemo(() => (maps ? dataCanvasToTexture(maps.smooth) : null), [maps]);
 
   useEffect(() => () => { photoTex?.dispose(); }, [photoTex]);
   useEffect(() => () => { patternTex?.dispose(); }, [patternTex]);
   useEffect(() => () => { displaceTex?.dispose(); }, [displaceTex]);
   useEffect(() => () => { lightTex?.dispose(); }, [lightTex]);
   useEffect(() => () => { shadingTex?.dispose(); }, [shadingTex]);
+  useEffect(() => () => { smoothTex?.dispose(); }, [smoothTex]);
 
-  return { photoTex, patternTex, displaceTex, lightTex, shadingTex };
+  return { photoTex, patternTex, displaceTex, lightTex, shadingTex, smoothTex };
 }

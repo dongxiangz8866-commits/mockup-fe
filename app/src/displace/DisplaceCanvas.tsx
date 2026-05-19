@@ -5,7 +5,7 @@ import type { Quad } from '../shading';
 import { frag, makeUniforms, vert, type DisplaceUniforms } from './displaceShader';
 import { recordPrint, recordRender } from './perfBus';
 
-export type DebugMode = 'composite' | 'displace' | 'light' | 'shading' | 'fine' | 'foldGrad' | 'cloth';
+export type DebugMode = 'composite' | 'displace' | 'light' | 'shading' | 'fine' | 'foldGrad' | 'cloth' | 'smoothField';
 
 const debugModeIndex: Record<DebugMode, number> = {
   composite: 0,
@@ -15,6 +15,7 @@ const debugModeIndex: Record<DebugMode, number> = {
   fine: 4,
   foldGrad: 5,
   cloth: 6,
+  smoothField: 7,
 };
 
 type Props = {
@@ -24,6 +25,7 @@ type Props = {
   wrinkleDisplaceTex: THREE.Texture;
   lightTex: THREE.Texture;
   shadingTex: THREE.Texture;
+  smoothTex: THREE.Texture;
   photoSize: { w: number; h: number };
   quad: Quad;
   patternAspect: number;
@@ -31,6 +33,8 @@ type Props = {
   dispSign: number;
   depthWrap: number;
   wrinkleStrength: number;
+  smoothWarp: number;
+  smoothCenter: number;
   shadingP10: number;
   shadingP90: number;
   zCenter: number;
@@ -97,6 +101,7 @@ export default function DisplaceCanvas(p: Props) {
     uniforms.uWrinkleDisplace.value = p.wrinkleDisplaceTex;
     uniforms.uLight.value = p.lightTex;
     uniforms.uShading.value = p.shadingTex;
+    uniforms.uSmoothField.value = p.smoothTex;
     uniforms.uHairMask.value = p.hairTex;
     uniforms.uClothMask.value = p.clothTex;
   }, [
@@ -107,6 +112,7 @@ export default function DisplaceCanvas(p: Props) {
     p.wrinkleDisplaceTex,
     p.lightTex,
     p.shadingTex,
+    p.smoothTex,
     p.hairTex,
     p.clothTex,
   ]);
@@ -142,6 +148,14 @@ export default function DisplaceCanvas(p: Props) {
   useEffect(() => {
     uniforms.uWrinkleStrength.value = p.wrinkleStrength;
   }, [uniforms, p.wrinkleStrength]);
+
+  useEffect(() => {
+    uniforms.uSmoothWarp.value = p.smoothWarp;
+  }, [uniforms, p.smoothWarp]);
+
+  useEffect(() => {
+    uniforms.uSmoothCenter.value = p.smoothCenter;
+  }, [uniforms, p.smoothCenter]);
 
   useEffect(() => {
     uniforms.uShadingP10.value = p.shadingP10;

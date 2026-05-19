@@ -14,6 +14,9 @@ type Props = {
   wrinkle: number;
   setWrinkle: (n: number) => void;
   wrinkleEnabled: boolean;
+  smooth: number;
+  setSmooth: (n: number) => void;
+  smoothEnabled: boolean;
   debug: DebugMode;
   setDebug: (m: DebugMode) => void;
 };
@@ -26,6 +29,7 @@ const DEBUG_LABEL: Record<DebugMode, string> = {
   fine: 'Fine',
   foldGrad: '褶皱强度',
   cloth: '布料',
+  smoothField: '柔光场',
 };
 
 type RangeProps = {
@@ -57,11 +61,11 @@ function Range({ label, value, min, max, step, onChange, disabled }: RangeProps)
 }
 
 export default function ControlRail(p: Props) {
-  const modes: DebugMode[] = ['composite', 'displace', 'light', 'shading', 'fine', 'foldGrad', 'cloth'];
+  const modes: DebugMode[] = ['composite', 'displace', 'light', 'shading', 'fine', 'foldGrad', 'cloth', 'smoothField'];
   return (
     <section className={c.rail}>
       <div className={c.groupTitle}>调节</div>
-      <Range label="图案大小" value={p.scale} min={0.4} max={2.0} step={0.02} onChange={p.setScale} />
+      <Range label="图案大小" value={p.scale} min={0.4} max={3} step={0.02} onChange={p.setScale} />
       <Range label="光照" value={p.light} min={0} max={2} step={0.05} onChange={p.setLight} />
       <Range
         label="整体亮度"
@@ -88,6 +92,15 @@ export default function ControlRail(p: Props) {
         step={0.05}
         onChange={p.setWrinkle}
         disabled={!p.wrinkleEnabled}
+      />
+      <Range
+        label="贴合·真褶皱"
+        value={p.smooth}
+        min={0}
+        max={1}
+        step={0.02}
+        onChange={p.setSmooth}
+        disabled={!p.smoothEnabled}
       />
 
       <div className={c.groupTitle}>调试视图</div>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { detectPoseCached, readCachedPose, type PoseLandmark } from '../poseDetector';
 import {
@@ -17,6 +17,7 @@ import PatternPicker from './PatternPicker';
 import PerfPanel from './PerfPanel';
 import PhotoPicker from './PhotoPicker';
 import QuadHandles from './QuadHandles';
+import ResultActions from './ResultActions';
 import SourcePreview from './SourcePreview';
 import { sampleDepthStats } from './depthStats';
 import { recordStage, resetParse } from './perfBus';
@@ -110,6 +111,12 @@ export default function DisplacePage() {
   // path has been iterated to a dead-end. Off by default; the slider is
   // still there to raise it on shirts with genuine drape.
   const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(0);
+  // 2026-05-19 user idea: write a low-pass fold field INTO the depth z and
+  // reuse the proven absolute-radial-drop cylinder wrap. User evaluated it
+  // and set the default to 1 (full, on by default) — so it now affects every
+  // photo. On a flat studio front-T the field is ~flat ⇒ negligible effect
+  // (signal isn't in the pixels); on real drape it's the bumpy-cylinder wrap.
+  const [smoothWarp, setSmoothWarp] = useState(1);
 
   // Photo + pose + maps pipeline.
   useEffect(() => {
@@ -189,7 +196,7 @@ export default function DisplacePage() {
     };
   }, [patternSrc]);
 
-  const { photoTex, patternTex, displaceTex: dogDisplaceTex, lightTex, shadingTex } =
+  const { photoTex, patternTex, displaceTex: dogDisplaceTex, lightTex, shadingTex, smoothTex } =
     useDisplaceTextures(photo, patternImg, maps);
 
   // Memoize photoSize so its REFERENCE is stable across renders (was a fresh
@@ -328,6 +335,15 @@ export default function DisplacePage() {
     [depthResult.depth, scaledQuad]
   );
 
+  // Smooth-field value at the print center — the z'-injection's center
+  // reference, so drop' = (z'_center − z'_here)/z'_center stays 0 at the
+  // print center (no net translation of the whole print). Reuses the same
+  // quad-center sampler as depthStats; recomputed on move/scale only.
+  const smoothCenter = useMemo(
+    () => (maps?.smooth ? sampleDepthStats(maps.smooth, scaledQuad).center : 0.0),
+    [maps, scaledQuad]
+  );
+
   // Per-image shading percentiles inside the pose quad. Drives slider
   // normalization — the wrinkle slider previously meant "DoG contrast
   // multiplier", which varies wildly across photos. After this remap it
@@ -442,14 +458,21 @@ export default function DisplacePage() {
     const handler = (e: WheelEvent) => {
       e.preventDefault();
       const dir = e.deltaY < 0 ? 1 : -1;
-      setScale((s) => Math.max(0.4, Math.min(2.0, s * (1 + dir * 0.05))));
+      setScale((s) => Math.max(0.4, Math.min(3, s * (1 + dir * 0.05))));
     };
     el.addEventListener('wheel', handler, { passive: false });
     return () => el.removeEventListener('wheel', handler);
   }, []);
 
+  // The r3f <Canvas> is the only <canvas> inside the stage frame. Closure is
+  // stable (stageRef is a ref) so ResultActions' useCallbacks don't churn.
+  const getCanvas = useCallback(
+    () => stageRef.current?.querySelector('canvas') ?? null,
+    []
+  );
+
   const ready =
-    status === 'ready' && photoTex && patternTex && displaceTex && wrinkleDisplaceTex && lightTex && shadingTex && scaledQuad && photoSize;
+    status === 'ready' && photoTex && patternTex && displaceTex && wrinkleDisplaceTex && lightTex && shadingTex && smoothTex && scaledQuad && photoSize;
 
   // Wrap setPhotoSrc so photo/quad/maps are cleared SYNCHRONOUSLY in the
   // same React 18 event batch. Without this, the render right after
@@ -545,6 +568,7 @@ export default function DisplacePage() {
                 wrinkleDisplaceTex={wrinkleDisplaceTex}
                 lightTex={lightTex}
                 shadingTex={shadingTex}
+                smoothTex={smoothTex}
                 photoSize={photoSize}
                 quad={scaledQuad}
                 patternAspect={patternAspect}
@@ -552,6 +576,8 @@ export default function DisplacePage() {
                 dispSign={1}
                 depthWrap={depthWrap}
                 wrinkleStrength={shadingTex ? wrinkleDepthStrength * shadingStats.autoScale * wrinkleDarkBoost : 0}
+                smoothWarp={smoothTex ? smoothWarp : 0}
+                smoothCenter={smoothCenter}
                 shadingP10={shadingStats.p10}
                 shadingP90={shadingStats.p90}
                 zCenter={depthStats.center}
@@ -586,6 +612,7 @@ export default function DisplacePage() {
               {quad && !hoverStage && !drag.dragging && (
                 <div className={s.editHint}>悬停可编辑印图</div>
               )}
+              <ResultActions getCanvas={getCanvas} />
             </div>
           )}
         </div>
@@ -604,6 +631,9 @@ export default function DisplacePage() {
             wrinkle={wrinkleDepthStrength}
             setWrinkle={setWrinkleDepthStrength}
             wrinkleEnabled={!!shadingTex}
+            smooth={smoothWarp}
+            setSmooth={setSmoothWarp}
+            smoothEnabled={!!smoothTex}
             debug={debug}
             setDebug={setDebugMode}
           />
