@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { detectPoseCached, readCachedPose, type PoseLandmark } from '../poseDetector';
+import { POSE_INDEX, detectPoseCached, readCachedPose, type PoseLandmark } from '../poseDetector';
+import { measureClothWidthAtRow } from '../shading/measureClothWidth';
 import {
   classifyShirt,
   quadFromLandmarks,
@@ -113,6 +114,10 @@ export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpM
   const [quad, setQuad] = useState<Quad | null>(null);
   const [maps, setMaps] = useState<DerivedMaps | null>(null);
   const [status, setStatus] = useState<LoadState>('idle');
+  // Pose landmarks lifted to state so the cloth-mask becoming available can
+  // trigger a quad re-derive (with garment-width sizing) without re-running
+  // pose detection or the maps pipeline.
+  const [poseLm, setPoseLm] = useState<PoseLandmark[] | null>(null);
 
   const [scale, setScale] = useState(1.0);
   const [light, setLightStrength] = useState(1.0);
@@ -170,6 +175,7 @@ export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpM
       setPhoto(null);
       setQuad(null);
       setMaps(null);
+      setPoseLm(null);
       resetParse(performance.now());
       try {
         const tLoad = performance.now();
@@ -193,6 +199,7 @@ export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpM
         if (cancelled) return;
         recordStage('pose', performance.now() - tPose, poseCached ? 'localStorage' : 'compute');
         const detectedQuad = lm ? quadFromLandmarks(lm, img.naturalWidth, img.naturalHeight) : null;
+        setPoseLm(lm);
         setQuad(detectedQuad);
 
         setStatus('maps');
@@ -330,6 +337,28 @@ export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpM
     [clothTex]
   );
 
+  // Cloth-mask sizing: once the garment mask is ready, measure its horizontal
+  // span at chest level and re-derive quad with that as the size base. Print
+  // ends up at a constant fraction of GARMENT width — same visual size across
+  // close-up and far photos AND across fitted vs oversized tees. Initial render
+  // (before mask) used shoulderLen, so this is a one-shot rescale per photo.
+  useEffect(() => {
+    if (!poseLm || !photo || !clothResult.cloth) return;
+    const ls = poseLm[POSE_INDEX.leftShoulder];
+    const rs = poseLm[POSE_INDEX.rightShoulder];
+    if (!ls || !rs) return;
+    const photoH = photo.naturalHeight;
+    const photoW = photo.naturalWidth;
+    const midShoulderY = ((ls.y + rs.y) / 2) * photoH;
+    const shoulderLenPx = Math.hypot((ls.x - rs.x) * photoW, (ls.y - rs.y) * photoH);
+    // Sample just below shoulders (10% of shoulderLen down) where torso is
+    // dominant and the neckline is no longer in the way.
+    const sampleY = midShoulderY + shoulderLenPx * 0.1;
+    const clothW = measureClothWidthAtRow(clothResult.cloth, sampleY);
+    if (clothW <= 0) return;
+    setQuad(quadFromLandmarks(poseLm, photoW, photoH, undefined, clothW));
+  }, [poseLm, photo, clothResult.cloth]);
+
   // ImageMagick-port luma displace, built only when /gradient is on the luma
   // source. Memoized per src (cloth-suffixed) via lumaMemCache so dragging the
   // print never rebuilds it. cloth=null → builder uses a global mean and
@@ -430,9 +459,12 @@ export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpM
   // terms (uWrinkleStrength, on by default here) ride on top to sink the
   // print into every crease. The dormant ∇ branch (uGradientWarp) is retired
   // — radial-on-luma supersedes it. /displace path unchanged.
-  // 6→3→2: image 7's overall arc was still too deep / unnatural ("没这么深
-  // 的…弧形"). A subtle body curve; the "贴合强度" slider scales from here.
-  const GRAD_DEPTH_BOOST = 2.0;
+  // 6→3→2→1 (2026-05-20). At BOOST=2 + slider=0.5, fromCenter scale reached
+  // (1 + 1.0·drop) ≈ 2× and pushed pattern UV outside the quad — visible as
+  // both gross deformation and pink-edge ClampToEdge contamination spilling
+  // past the print boundary. BOOST=1 caps slider=0.5 at scale ≤ 1.5× (subtle
+  // body curve, no spill); slider=1 still reaches the old scale=2 max.
+  const GRAD_DEPTH_BOOST = 1.0;
   const sourceReady = useLuma || (gradientSrc === 'depth' && !!depthTex);
   const depthWrap =
     warpMode === 'gradient'
