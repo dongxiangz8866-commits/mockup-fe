@@ -20,14 +20,7 @@
 // sigma 22 / 12% tiles) so the body-form scale is stable across our 1280–2K
 // photos instead of being a fixed pixel count.
 const FORM_W = 1.5;
-// 0.8 → 0 (2026-05-20). The FOLD term is CLAHE-style high-pass + sigmoid
-// steepen — sharp, high-contrast, and the source of the mesh-warp锯齿 the
-// user sees on /gradient at slider=0.5: 32×32 vertex sampling on a highly
-// nonlinear field produces visibly different push at adjacent vertices →
-// triangle seams show. FORM alone is broad-blur body shape ⇒ globally smooth
-// drop field ⇒ neighbour vertices land on near-equal push ⇒ no锯齿. Crease
-// detail returns via "贴合·真褶皱" (smoothWarp into z) when the user wants it.
-const FOLD_W = 0;
+const FOLD_W = 0.8;
 const DENOISE_PX = 2;
 const FORM_BLUR_FRAC = 0.02; // ≈ script's 0x22 at reference resolution
 const FOLD_RADIUS_FRAC = 0.06; // ≈ half a 12% CLAHE tile

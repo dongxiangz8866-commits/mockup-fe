@@ -283,11 +283,7 @@ export const frag = /* glsl */ `
     // the quad spans quadAspect × 1. Pick the largest box of aspect
     // uPatternAspect that fits, center it, remap into its [0,1]² — the margin
     // falls outside [0,1] and the existing fwidth edge-cut clips it away.
-    // Two UV taps. WARPED drives pattern color sample (interior conforms to
-    // body curvature — this is "贴合"). NOMINAL drives the alpha cutoff so
-    // the print outline stays a clean rectangle. Before: the same warped UV
-    // did both, so radial push rippled the rectangle edges along folds
-    // (image-3 wavy pink boundary). Now: 图案贴合 + 矩形边平直.
+    vec2 q = photoToPatternUV(vPuvWarped);
     float quadW = length((uQuadTR - uQuadTL) * uPhotoSize);
     float quadH = length((uQuadBL - uQuadTL) * uPhotoSize);
     float quadAspect = quadW / max(quadH, 1e-4);
@@ -295,26 +291,18 @@ export const frag = /* glsl */ `
     float boxH = (uPatternAspect >= quadAspect) ? quadAspect / max(uPatternAspect, 1e-4) : 1.0;
     float boxLeft = (quadAspect - boxW) * 0.5;
     float boxTop  = (1.0 - boxH) * 0.5;
-
-    vec2 qW = photoToPatternUV(vPuvWarped);
-    vec2 patUVWarped = vec2(
-      (qW.x * quadAspect - boxLeft) / boxW,
-      (qW.y - boxTop) / boxH
-    );
-    vec2 qN = photoToPatternUV(vUv);
-    vec2 patUVNominal = vec2(
-      (qN.x * quadAspect - boxLeft) / boxW,
-      (qN.y - boxTop) / boxH
+    vec2 patUV = vec2(
+      (q.x * quadAspect - boxLeft) / boxW,
+      (q.y - boxTop) / boxH
     );
 
-    vec4 patCol = texture2D(uPattern, patUVWarped);
+    vec4 patCol = texture2D(uPattern, patUV);
 
-    // Edge-soft cut on NOMINAL UV — 1-px AA boundary that doesn't ripple
-    // with wrap push. smoothstep drops to 0 just outside [0,1] so the
-    // ClampToEdge color smear that produced the pink contamination is cut.
-    vec2 fw = max(fwidth(patUVNominal), vec2(1e-4));
-    vec2 lo = smoothstep(vec2(0.0), fw, patUVNominal);
-    vec2 hi = vec2(1.0) - smoothstep(vec2(1.0) - fw, vec2(1.0), patUVNominal);
+    // Same edge-soft cut as before — keeps a one-pixel-wide AA at the
+    // quad boundary, kills the smear-to-edge ClampToEdge would give.
+    vec2 fw = max(fwidth(patUV), vec2(1e-4));
+    vec2 lo = smoothstep(vec2(0.0), fw, patUV);
+    vec2 hi = vec2(1.0) - smoothstep(vec2(1.0) - fw, vec2(1.0), patUV);
     float inside = lo.x * lo.y * hi.x * hi.y;
     patCol.a *= inside;
 
