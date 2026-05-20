@@ -12,7 +12,8 @@ import {
 } from '../shading';
 import ControlRail from './ControlRail';
 import DisplaceCanvas, { type DebugMode } from './DisplaceCanvas';
-import { buildLumaDisplace, buildLumaFold, buildLumaLight } from './lumaDisplace';
+import { buildLumaDisplace, buildLumaFold } from './lumaDisplace';
+import { buildCalibratedLight } from './calibratedLight';
 import { deriveMaps, type DerivedMaps } from './MapPipeline';
 import PatternPicker from './PatternPicker';
 import PerfPanel from './PerfPanel';
@@ -122,10 +123,10 @@ export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpM
   const lift = 0.0;
   const tint = 0.5;
   const strength = 1.0;
-  // 2.0 → 1.0 (2026-05-18): user accepts the print curves to follow the body
-  // but wants the curve gentle, not a hard barrel. The cloth-mask gate in the
-  // shader keeps this confined to the garment; this just softens its amount.
-  const [depthWrapStrength, setDepthWrapStrength] = useState(1.0);
+  // /displace: 2.0 → 1.0 (2026-05-18) — gentle body curve, not a hard barrel.
+  // /gradient: default 0 (2026-05-20 user request) — slider starts off; dial
+  // up if needed. /displace keeps 1.0.
+  const [depthWrapStrength, setDepthWrapStrength] = useState(warpMode === 'gradient' ? 0 : 1.0);
   const [debug, setDebugMode] = useState<DebugMode>('composite');
   // Default 0 everywhere. This is the ∇shading direction push — it bends the
   // artwork ALONG each crease, i.e. it is exactly the "变形" the user
@@ -135,11 +136,11 @@ export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpM
   // knowingly, but it ships OFF so the default is clean conform, no deform.
   const [wrinkleDepthStrength, setWrinkleDepthStrength] = useState(0);
   // 2026-05-19 user idea: write a low-pass fold field INTO the depth z and
-  // reuse the proven absolute-radial-drop cylinder wrap. User evaluated it
-  // and set the default to 1 (full, on by default) — so it now affects every
-  // photo. On a flat studio front-T the field is ~flat ⇒ negligible effect
-  // (signal isn't in the pixels); on real drape it's the bumpy-cylinder wrap.
-  const [smoothWarp, setSmoothWarp] = useState(1);
+  // reuse the proven absolute-radial-drop cylinder wrap.
+  // /displace: stays 1 (user-evaluated default).
+  // /gradient: default 0 (2026-05-20 user request) — "贴合·真褶皱" slider
+  // starts off; dial up if needed.
+  const [smoothWarp, setSmoothWarp] = useState(warpMode === 'gradient' ? 0 : 1);
   // /gradient: which grayscale map drives the radial wrap.
   //   'depth' — DAv2 macro depth. Smooth body shape but monocular depth
   //             ABSORBS fold detail — the user's "dav2 很多褶皱它没有".
@@ -357,15 +358,23 @@ export default function DisplacePage({ warpMode = 'radial' }: { warpMode?: WarpM
   // gate/cache. Fed into the existing uLight multiply slot (no shader
   // change) so the print reads as wrapped on the torso — the actual "贴合"
   // lever, geometric warp is only a minor helper.
+  // 2026-05-20: 用 /canvaskit 的光照链 (softenLightMap + sampleLightStats
+  // z-score + SNR confidence) 替换 buildLumaLight。原 ImageMagick LIGHT port
+  // 的 sigmoid+2× clamp 会把 trusted-dark 像素压成 L≈0 → printed = rgb·0 =
+  // 局部黑斑。现在低 SNR (黑衣噪声) → 校准光照退回 identity 255 → 无伪暗斑;
+  // 可信 spread 归一到固定 TARGET → 折痕深度在不同照片间观感一致。仍喂同一
+  // uLight slot,shader 零改动。quad 用 pose-detected 原始版本（非 scaledQuad），
+  // 用户拖/缩不会重 rebake (stats 是 photo 属性,缓存键已说明)。
   const lumaLightCanvas = useMemo<HTMLCanvasElement | null>(() => {
-    if (warpMode !== 'gradient' || gradientSrc !== 'luma' || !photo || !photoSrc) return null;
+    if (warpMode !== 'gradient' || gradientSrc !== 'luma' || !photo || !photoSrc || !maps)
+      return null;
     const key = `${photoSrc}|${clothResult.cloth ? 'm' : 'n'}`;
     const cached = lumaLightMemCache.get(key);
     if (cached) return cached;
-    const built = buildLumaLight(photo, clothResult.cloth ?? null);
+    const built = buildCalibratedLight(maps.light, clothResult.cloth ?? null, quad);
     lumaLightMemCache.set(key, built);
     return built;
-  }, [warpMode, gradientSrc, photo, photoSrc, clothResult.cloth]);
+  }, [warpMode, gradientSrc, photo, photoSrc, clothResult.cloth, maps, quad]);
   const lumaLightTex = useMemo(
     () => (lumaLightCanvas ? dataCanvasToTexture(lumaLightCanvas) : null),
     [lumaLightCanvas]
