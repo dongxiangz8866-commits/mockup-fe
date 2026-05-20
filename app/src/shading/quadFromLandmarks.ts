@@ -124,9 +124,16 @@ export function quadFromLandmarks(
   // so PRINT_W_FRAC (which was calibrated against shoulder span) produces
   // print_width = clothWidth × PRINT_W_UV — a constant fraction of the GARMENT
   // regardless of fit (fitted vs oversized tee).
-  const sizeBase = widthOverride && widthOverride > 0
+  // 2026-05-20: cap at 1.15× shoulderLen. Oversized cloth widths can run
+  // 1.4–1.6× shoulder span; without a cap the print spills past the shoulder
+  // landmark onto the upper-arm/hair region — SkSL occl=1-hair then削掉
+  // 那块 print → 透出 photo 原色,黑发模特上呈现为印图矩形左/右下角的"黑块"。
+  // 1.15× lets oversized still print bigger than fitted while staying inside
+  // shoulder territory.
+  const rawSizeBase = widthOverride && widthOverride > 0
     ? widthOverride * SHOULDER_SPAN_OF_CLOTH_W
     : shoulderLen;
+  const sizeBase = Math.min(rawSizeBase, shoulderLen * 1.15);
   const halfW = sizeBase * 0.5 * PRINT_W_FRAC * PRINT_SIZE_SCALE;
   const halfX = Math.cos(tiltAngle) * halfW;
   const halfY = Math.sin(tiltAngle) * halfW;
