@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { detectPoseCached, readCachedPose, type PoseLandmark } from '../poseDetector';
+import { POSE_INDEX, detectPoseCached, readCachedPose, type PoseLandmark } from '../poseDetector';
+import { measureClothWidthAtRow } from '../shading/measureClothWidth';
 import {
   quadFromLandmarks, sampleGarment, sampleScene,
   type GarmentSample, type Quad, type SceneSample,
@@ -55,6 +56,10 @@ export default function CanvasKitPage() {
   const [quad, setQuad] = useState<Quad | null>(null);
   const [maps, setMaps] = useState<DerivedMaps | null>(null);
   const [status, setStatus] = useState<LoadState>('idle');
+  // Pose landmarks lifted to state so cloth-mask-ready can trigger a quad
+  // re-derive (with garment-width sizing) without rerunning pose detection
+  // or the maps pipeline.
+  const [poseLm, setPoseLm] = useState<PoseLandmark[] | null>(null);
 
   const [scale, setScale] = useState(1.0);
   const [light, setLight] = useState(1.0);
@@ -74,6 +79,7 @@ export default function CanvasKitPage() {
       setPhoto(null);
       setQuad(null);
       setMaps(null);
+      setPoseLm(null);
       resetParse(performance.now());
       try {
         const tLoad = performance.now();
@@ -93,6 +99,7 @@ export default function CanvasKitPage() {
         if (cancelled) return;
         recordStage('pose', performance.now() - tPose, poseCached ? 'localStorage' : 'compute');
         const q = lm ? quadFromLandmarks(lm, img.naturalWidth, img.naturalHeight) : null;
+        setPoseLm(lm);
         setQuad(q);
         setStatus('maps');
         const tMaps = performance.now();
@@ -121,6 +128,25 @@ export default function CanvasKitPage() {
   const depthResult = useDepthMap(photo, photoSrc);
   const hairResult = useHairMask(photo, photoSrc);
   const clothResult = useClothMask(photo, photoSrc);
+
+  // Cloth-mask sizing: re-derive quad using GARMENT width once the mask is
+  // ready, so the print is a constant fraction of the visible shirt instead
+  // of shoulder span (matters for oversized tees + photos at different
+  // distances). One-shot rescale per photo.
+  useEffect(() => {
+    if (!poseLm || !photo || !clothResult.cloth) return;
+    const ls = poseLm[POSE_INDEX.leftShoulder];
+    const rs = poseLm[POSE_INDEX.rightShoulder];
+    if (!ls || !rs) return;
+    const photoW = photo.naturalWidth;
+    const photoH = photo.naturalHeight;
+    const midShoulderY = ((ls.y + rs.y) / 2) * photoH;
+    const shoulderLenPx = Math.hypot((ls.x - rs.x) * photoW, (ls.y - rs.y) * photoH);
+    const sampleY = midShoulderY + shoulderLenPx * 0.1;
+    const clothW = measureClothWidthAtRow(clothResult.cloth, sampleY);
+    if (clothW <= 0) return;
+    setQuad(quadFromLandmarks(poseLm, photoW, photoH, undefined, clothW));
+  }, [poseLm, photo, clothResult.cloth]);
 
   const photoSize = useMemo(
     () => (photo ? { w: photo.naturalWidth, h: photo.naturalHeight } : null),
