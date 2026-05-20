@@ -24,6 +24,7 @@ uniform shader uDisplace;
 uniform shader uFine;
 uniform shader uHair;
 uniform shader uCloth;
+uniform shader uPhotoLow;
 
 uniform float2 uSurf;
 uniform float2 uMapSz;
@@ -40,6 +41,7 @@ uniform float  uShadingP10;
 uniform float  uShadingP90;
 uniform float  uFoldSpread;
 uniform float  uBlackMargin;
+uniform float  uFreqSep;
 
 half4 main(float2 fc) {
   float2 uv = fc / uSurf;
@@ -88,19 +90,35 @@ half4 main(float2 fc) {
   // collarbone / breast) just as readily as real cloth folds; without a
   // floor the closed-loop residual amplifies them into hard dark blobs on
   // white-on-white prints. MULT_FLOOR keeps darkening bounded structurally.
-  // 2026-05-20: max(...) → smoothstep blend. A hard max creates a kink
-  // exactly where the eye notices it most (the mid-tone transition where
-  // shadow first starts to "stop deepening") — visible as a hard ridge on
-  // creased shots. The smoothstep band ±FLOOR_SOFT means the dim → floor
-  // transition is C1 continuous; the floor itself is still binding at
-  // raw < MULT_FLOOR − FLOOR_SOFT so deep folds remain bounded.
-  const float MULT_FLOOR = 0.82;
+  // max(...) → smoothstep blend (C1 continuous): a hard max creates a kink
+  // at the mid-tone transition where shadow first stops deepening, visible
+  // as a hard ridge on creased shots. ±FLOOR_SOFT smooths the transition;
+  // the floor itself still binds at raw < MULT_FLOOR − FLOOR_SOFT so deep
+  // folds remain bounded. 2026-05-20 LATE: restored MULT_FLOOR 0.82 → 0.70
+  // (previous lowering came from the same misguided "tune down" pass that
+  // also lowered K_BASE/CONTRAST/FOLDK_MAX; user wants real auto-shadow,
+  // not a perpetually-bright print).
+  const float MULT_FLOOR = 0.70;
   const float FLOOR_SOFT = 0.08;
   float raw = 1.0 - depth * uFoldK * room * occl;
   float w = smoothstep(MULT_FLOOR - FLOOR_SOFT, MULT_FLOOR + FLOOR_SOFT, raw);
   float mult = mix(MULT_FLOOR, raw, w);
   half3 printed = rgb * mix(1.0, mult, pa);
   half3 comp = mix(photoCol, printed, pa * occl);
+
+  // Frequency-separation ADDITIVE overlay (NOT a replacement of comp).
+  // The fold-light math above already produced the right tonality (print
+  // darkened by folds, lighting preserved — user wants both). All we add
+  // here is the shirt's HIGH-FREQ fabric grain on top of the print, so it
+  // reads as woven into the cotton instead of floating. R is small enough
+  // (~5 px, see photoLowPass.ts) that HIGH = ONLY grain — folds/shading
+  // already live in LOW and are NOT transferred (that's the fold-light
+  // path's job). Gated by pa·occl so grain only lands in the print region
+  // and not where the photo shows through.
+  if (uFreqSep > 0.5) {
+    half3 photoHigh = photoCol - uPhotoLow.eval(mp).rgb;
+    comp = clamp(comp + half3(pa * occl) * photoHigh, half3(0.0), half3(1.0));
+  }
 
   half3 outRGB = comp;
   int dm = int(uDebugMode + 0.5);
@@ -129,7 +147,7 @@ half4 main(float2 fc) {
 
 // Child shader names in the exact order makeShaderWithChildren expects.
 export const CHILD_ORDER = [
-  'pattern', 'photo', 'light', 'shading', 'smooth', 'displace', 'fine', 'hair', 'cloth',
+  'pattern', 'photo', 'light', 'shading', 'smooth', 'displace', 'fine', 'hair', 'cloth', 'photoLow',
 ] as const;
 
 export type CompositeUniforms = {
@@ -150,10 +168,11 @@ export type CompositeUniforms = {
   shadingP90: number;
   foldSpread: number;
   blackMargin: number;
+  freqSep: number;
 };
 
 // Flatten in SkSL declaration order — CanvasKit packs runtime-effect
-// uniforms tightly (float3 = 3 floats, no std140 padding). 21 floats.
+// uniforms tightly (float3 = 3 floats, no std140 padding). 22 floats.
 export function packUniforms(u: CompositeUniforms): Float32Array {
   return new Float32Array([
     u.surfW, u.surfH,
@@ -171,5 +190,6 @@ export function packUniforms(u: CompositeUniforms): Float32Array {
     u.shadingP90,
     u.foldSpread,
     u.blackMargin,
+    u.freqSep,
   ]);
 }

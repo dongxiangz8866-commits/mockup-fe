@@ -58,6 +58,8 @@ export type RenderArgs = {
   clothClipImg: Image;
   /** rgb = garment mask (opaque) — debug-6 child only. */
   clothImg: Image;
+  /** photo blurred at ~3% min-dim — freq-sep low-pass source. */
+  photoLowImg: Image;
   mesh: Mesh;
   photoW: number;
   photoH: number;
@@ -119,6 +121,7 @@ export function renderCanvasKit(a: RenderArgs): void {
     a.fineImg.makeShaderOptions(...opts),
     a.hairImg.makeShaderOptions(...opts),
     a.clothImg.makeShaderOptions(...opts),
+    a.photoLowImg.makeShaderOptions(...opts),
   ];
   const u = packUniforms({
     ...a.uniforms,

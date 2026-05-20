@@ -25,6 +25,7 @@ import { usePerfMetrics } from '../displace/usePerfMetrics';
 import { useQuadDrag } from '../displace/useQuadDrag';
 import CanvasKitStage from './CanvasKitStage';
 import { sampleLightStats, softenLightMap } from './lightStats';
+import { buildPhotoLowPass } from './photoLowPass';
 import s from '../displace/DisplacePage.module.css';
 
 type LoadState = 'idle' | 'loading' | 'pose' | 'maps' | 'ready' | 'fail';
@@ -39,19 +40,20 @@ const sceneMemCache = new Map<string, SceneSample>();
 // Garment/pattern color is absorbed by the shader's headroom rolloff, photo
 // lighting intensity by lightStats.spread, signal trust by .confidence —
 // see lightStats.ts. /displace keeps its own tuning (memory: only /canvaskit).
-// 2026-05-20: knobs lowered (0.55→0.38, 0.18→0.12) — user reported lighting
-// still felt "carried over from previous pattern" on pattern switch even with
-// FOLDK_MAX/MULT_FLOOR guards. Reducing both the base target AND the closed-
-// loop target shrinks the per-pattern residual swing (residual = target/meas
-// → smaller target → smaller meas → smaller absolute residual gap between
-// patterns) so a pattern A→B switch can't accumulate visible lighting deltas.
-const TARGET_K_BASE = 0.38; // deepest trusted fold darkens a bright pixel ≤38%
+// 2026-05-20 LATE: restored to 0.55/0.18 (original closed-loop values).
+// The earlier 0.55→0.38 / 0.18→0.12 lowering was driven by a "lighting
+// carries over between patterns" report, but the real cause turned out to
+// be the renderKey-on-patternSrc bug (fixed separately by keying on
+// patternImg.src). Lowering these knobs was a band-aid that flattened the
+// auto-shadow effect — user wants that effect back; the renderKey fix is
+// what actually solves the carryover.
+const TARGET_K_BASE = 0.55; // deepest trusted fold darkens a bright pixel ≤55%
 const BLACK_MARGIN = 0.2; // pattern pixels below this (max channel) can't darken
 // Closed-loop target: CanvasKitStage measures the printed region and pulls
 // its perceptual contrast toward this fixed value. This is what makes "not
 // too strong / not too weak" hold on the un-exhaustible garment×pattern×
 // light space — it's measured on the real output, not guessed from color.
-const TARGET_CONTRAST = 0.12; // desired printed-region perceptual P90−P10
+const TARGET_CONTRAST = 0.18; // desired printed-region perceptual P90−P10
 
 export default function CanvasKitPage() {
   const [photoSrc, setPhotoSrc] = useState<string | null>(null);
@@ -74,6 +76,10 @@ export default function CanvasKitPage() {
   const [wrinkle, setWrinkle] = useState(0);
   const [smoothWarp, setSmoothWarp] = useState(0.4);
   const [debug, setDebug] = useState<DebugMode>('composite');
+  // Freq-sep mode bypasses the fold-light pipeline entirely; see
+  // photoLowPass.ts. Default off so the legacy path is the baseline; user
+  // flips it to compare against the Doraemon-style reference.
+  const [freqSep, setFreqSep] = useState(false);
   const lift = 0.0;
   const tint = 0.5;
 
@@ -231,6 +237,17 @@ export default function CanvasKitPage() {
     () => (maps?.light ? softenLightMap(maps.light) : null),
     [maps]
   );
+  // Photo low-pass for frequency-separation compositing. 0.5% min-dim ≈ 5 px
+  // — just above fabric-grain scale so HIGH contains ONLY grain; everything
+  // bigger (folds, shading, body curvature) lives in LOW and gets cleanly
+  // replaced by the pattern. See photoLowPass.ts header for the rationale
+  // (the radius is INTUITIVELY backwards from what "low-pass radius for
+  // freq-sep" sounds like — small R = clean print). Built once per photo,
+  // cost is one canvas blur ~5 ms on a 1200-px photo.
+  const photoLow = useMemo(
+    () => (photo ? buildPhotoLowPass(photo, 0.005) : null),
+    [photo]
+  );
   // Normalizers 1 + 3 — measured on the SOFTENED light map the shader reads
   // (consistency), cloth-gated. Recomputes on quad like shadingStats.
   const lightStats = useMemo(
@@ -264,7 +281,8 @@ export default function CanvasKitPage() {
 
   const ready =
     status === 'ready' && !!photo && !!patternImg && !!photoSize && !!scaledQuad &&
-    !!maps && depthResult.state === 'ready' && !!depthResult.depth && !!depthResult.depthFine;
+    !!maps && depthResult.state === 'ready' && !!depthResult.depth && !!depthResult.depthFine &&
+    !!photoLow;
 
   const failed = status === 'fail';
   const parsing = status === 'loading' || status === 'pose' || status === 'maps';
@@ -351,6 +369,8 @@ export default function CanvasKitPage() {
                 fineCanvas={depthResult.depthFine!}
                 hairCanvas={hairResult.hair}
                 clothCanvas={clothResult.cloth}
+                photoLowCanvas={photoLow!}
+                freqSep={freqSep}
                 patternAspect={patternAspect}
                 strength={1.0}
                 dispSign={1}
@@ -409,6 +429,8 @@ export default function CanvasKitPage() {
             wrinkleEnabled={!!maps}
             smooth={smoothWarp}
             setSmooth={setSmoothWarp}
+            freqSep={freqSep}
+            setFreqSep={setFreqSep}
             smoothEnabled={!!maps?.smooth}
             debug={debug}
             setDebug={setDebug}

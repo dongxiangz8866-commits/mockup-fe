@@ -14,13 +14,14 @@ import { measurePrintedContrast, renderCanvasKit } from './renderCanvasKit';
 const MAX_DIM = 1800; // backing-store cap (DAv2 maps are ~518 upsampled)
 const K_RES_MIN = 0.2; // closed-loop residual clamp (foldK pull-down floor)
 const K_RES_MAX = 2.5; // … and boost ceiling for genuinely-flat cloth
-// Hard ceiling on the EFFECTIVE foldK reaching the shader. 2026-05-20:
-// lowered 0.85 → 0.55 alongside the TARGET_K_BASE/TARGET_CONTRAST cuts in
-// CanvasKitPage — the goal is "tune down the lighting algorithm's overall
-// influence" so cross-pattern visual drift becomes invisible. The closed
-// loop can still pull DOWN below this on legitimately deep folds; it just
-// can't boost a flat-shirt noise dip into a visible blob.
-const FOLDK_MAX = 0.55;
+// Hard ceiling on the EFFECTIVE foldK reaching the shader. Restored to 0.85
+// (2026-05-20 LATE) after the brief 0.55 lowering proved to flatten shadows.
+// The cap exists for the white-shirt + white-pattern degenerate case where
+// lightStats.spread saturates at MIN_SPREAD and a tiny chin-shadow can hit
+// depth=1; 0.85 still bounds that worst case (mult ≈ 0.15, visible shadow
+// not blackout) while letting deep folds darken legitimately on photos
+// where the auto-calibration legitimately wants strong fold-light.
+const FOLDK_MAX = 0.85;
 const DBG: Record<DebugMode, number> = {
   composite: 0, displace: 1, light: 2, shading: 3,
   fine: 4, foldGrad: 5, cloth: 6, smoothField: 7,
@@ -38,6 +39,8 @@ type Props = {
   fineCanvas: HTMLCanvasElement; // depth fine — debug-4 only
   hairCanvas: HTMLCanvasElement | null;
   clothCanvas: HTMLCanvasElement | null;
+  photoLowCanvas: HTMLCanvasElement;
+  freqSep: boolean;
   patternAspect: number;
   strength: number;
   dispSign: number;
@@ -97,9 +100,10 @@ export default function CanvasKitStage(p: Props) {
       pattern: m(patternRaster), photo: m(p.photo), light: m(p.lightCanvas),
       shading: m(p.shadingCanvas), smooth: m(p.smoothCanvas), displace: m(p.macroCanvas),
       fine: m(p.fineCanvas), hair: m(hairSrc), cloth: m(clothSrc), clothClip: m(clothClip),
+      photoLow: m(p.photoLowCanvas),
     };
   }, [ck, patternRaster, p.photo, p.lightCanvas, p.shadingCanvas, p.smoothCanvas,
-    p.macroCanvas, p.fineCanvas, hairSrc, clothSrc, clothClip]);
+    p.macroCanvas, p.fineCanvas, hairSrc, clothSrc, clothClip, p.photoLowCanvas]);
   useEffect(() => {
     return () => {
       if (imgs) Object.values(imgs).forEach((i: Image) => i.delete());
@@ -132,31 +136,39 @@ export default function CanvasKitStage(p: Props) {
       depthWrap: p.depthWrap, strength: p.strength, dispSign: p.dispSign,
       smoothWarp: p.smoothWarp, wrinkleStrength: p.wrinkleStrength,
     });
-    const renderWith = (foldK: number) =>
+    const renderWith = (foldK: number, freqSep: boolean) =>
       renderCanvasKit({
         ck, canvas, mesh, photoW: p.photoSize.w, photoH: p.photoSize.h, surfaceScale: scale,
         patternImg: imgs.pattern, photoImg: imgs.photo, lightImg: imgs.light,
         shadingImg: imgs.shading, smoothImg: imgs.smooth, displaceImg: imgs.displace,
         fineImg: imgs.fine, hairImg: imgs.hair, clothClipImg: imgs.clothClip,
-        clothImg: imgs.cloth,
+        clothImg: imgs.cloth, photoLowImg: imgs.photoLow,
         uniforms: {
           envRGB: p.envRGB, garmentRGB: p.garmentRGB, tint: p.tint,
           sceneBrightness: p.sceneBrightness, lift: p.lift, foldK,
           debugMode: DBG[p.debugMode], depthWrap: p.depthWrap,
           wrinkleStrength: p.wrinkleStrength, shadingP10: p.shadingP10, shadingP90: p.shadingP90,
           foldSpread: p.foldSpread, blackMargin: p.blackMargin,
+          freqSep: freqSep ? 1 : 0,
         },
       });
 
     const cap = (k: number) => Math.min(FOLDK_MAX, k);
     const cached = residualRef.current.key === p.renderKey;
-    renderWith(cap(p.foldKBase * (cached ? residualRef.current.r : 1)));
 
-    // First render of a new photo|pattern: measure the printed region and
-    // re-render ONCE with the corrected residual — synchronously, same tick,
-    // so the visible/exported frame is the corrected one regardless of React
-    // timing or photo size. Cached so drag/slider never re-enter this.
-    if (!cached) {
+    if (cached) {
+      // Drag / slider / freqSep-toggle path. Residual already calibrated
+      // for this photo|pattern; render once with the user's freqSep choice.
+      renderWith(cap(p.foldKBase * residualRef.current.r), p.freqSep);
+    } else {
+      // First time for this photo|pattern. PROBE with freqSep=OFF so the
+      // closed-loop measurement isn't biased by grain noise — grain has
+      // zero mean but raises P90−P10, which would otherwise make the loop
+      // dial foldK DOWN whenever the user enables freq-sep (weakening the
+      // auto-lighting). Probe + measure gives a freqSep-independent
+      // residual; final render adds grain back on top of the right
+      // fold-light intensity.
+      renderWith(cap(p.foldKBase), false);
       const m = measurePrintedContrast(ck, canvas, p.quad, scale);
       const r =
         m >= 0
@@ -166,7 +178,11 @@ export default function CanvasKitStage(p: Props) {
       if (import.meta.env.DEV) {
         console.log(`[foldCalib] measured=${m.toFixed(3)} → residual=${r.toFixed(2)} → foldK=${cap(p.foldKBase * r).toFixed(2)}`);
       }
-      if (Math.abs(r - 1) > 0.02) renderWith(cap(p.foldKBase * r));
+      // Re-render if residual changed OR if user wants freqSep (probe ran
+      // with freqSep=false). Skip only when both are no-ops.
+      if (Math.abs(r - 1) > 0.02 || p.freqSep) {
+        renderWith(cap(p.foldKBase * r), p.freqSep);
+      }
     }
     if (pendingSince.current != null) {
       recordPrint(performance.now() - pendingSince.current);

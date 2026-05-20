@@ -20,6 +20,10 @@ type Props = {
   // /gradient only: relabels the "fine" debug chip to "梯度源" (the active
   // warp-source view). The source toggle itself lives in the top bar now.
   gradientMode?: boolean;
+  // /canvaskit only: toggle frequency-separation compositing vs the legacy
+  // fold-light path. Both consumers don't pass this; only CanvasKitPage does.
+  freqSep?: boolean;
+  setFreqSep?: (b: boolean) => void;
   debug: DebugMode;
   setDebug: (m: DebugMode) => void;
 };
@@ -109,6 +113,19 @@ export default function ControlRail(p: Props) {
         onChange={p.setSmooth}
         disabled={!p.smoothEnabled}
       />
+
+      {p.setFreqSep && (
+        <label className={`${c.range}`} style={{ cursor: 'pointer' }}>
+          <span className={c.rangeLabel}>频率分离</span>
+          <input
+            type="checkbox"
+            checked={!!p.freqSep}
+            onChange={(e) => p.setFreqSep!(e.target.checked)}
+            style={{ marginLeft: 8 }}
+          />
+          <span className={c.rangeValue}>{p.freqSep ? '开' : '关'}</span>
+        </label>
+      )}
 
       <div className={c.groupTitle}>调试视图</div>
       <div className={c.debugGrid}>
