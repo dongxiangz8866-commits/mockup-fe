@@ -7,7 +7,6 @@ import {
 } from '../shading';
 import ControlRail from '../displace/ControlRail';
 import type { DebugMode } from '../displace/DisplaceCanvas';
-import { buildLumaLight } from '../displace/lumaDisplace';
 import { deriveMaps, type DerivedMaps } from '../displace/MapPipeline';
 import PatternPicker from '../displace/PatternPicker';
 import PerfPanel from '../displace/PerfPanel';
@@ -27,45 +26,6 @@ import { useQuadDrag } from '../displace/useQuadDrag';
 import CanvasKitStage from './CanvasKitStage';
 import { sampleLightStats, softenLightMap } from './lightStats';
 import s from '../displace/DisplacePage.module.css';
-
-// dispSource = 'depth' → 默认 /canvaskit:全套 canvaskit(depth radial wrap +
-//                         maps.smooth fold-into-z + softenLightMap(maps.light)
-//                         作 light)。
-//            = 'luma'  → /canvaskit-gradient:贴合(mesh warp/macro/smooth)、
-//                         shading、fineCanvas 全部保留 canvaskit 原样,
-//                         唯一替换 light 源为 ImageMagick 端口 buildLumaLight
-//                         —— 这是 /gradient 表达"褶皱"的来源(乘性暗化产生
-//                         印图上的 fold 暗带)。
-//
-// 历史教训:
-// • 第一版把 macro 换成 buildLumaDisplace → zCenter 在 luma form 上跟身体真
-//   曲面无关 → 贴合飞 + 闭环 residual 推到 2.5 → 局部褶皱过深。
-// • 第二版把 smooth 换成 buildLumaFold → DoG band 高对比 / 高频,32 mesh
-//   顶点采样邻近顶点 push 差异大 → 印图矩形被撕成锯齿边(memory:FOLD_W=0
-//   那条坑的同型号)。
-// • 当前(第三版):仅替换 light 通道源 — mesh warp 完全不动 → 贴合 = canvaskit。
-type DispSource = 'depth' | 'luma';
-
-// buildLumaLight 在 trusted-dark 像素(高 SNR 但灰度很低)经过 sigmoid+2× clamp
-// 会出硬黑斑(memory: 局部 L≈0 → printed=rgb·0 → 印图变暗斑)。
-// 解法:更激进的 blur (3% min(w,h)) 把硬黑斑磨成 gentle gradient — 比
-// canvaskit 默认的 softenLightMap (1.2%) 更重,把 lumaLight 的 sigmoid 高对比
-// 推到不再产生黑斑的水平,但保留 fold-scale 的明暗趋势。
-function softenLumaLight(raw: HTMLCanvasElement): HTMLCanvasElement {
-  const out = document.createElement('canvas');
-  out.width = raw.width;
-  out.height = raw.height;
-  const r = Math.max(4, Math.round(Math.min(raw.width, raw.height) * 0.03));
-  const ctx = out.getContext('2d')!;
-  ctx.filter = `blur(${r}px)`;
-  ctx.drawImage(raw, 0, 0);
-  return out;
-}
-
-// Module-level cache:buildLumaLight + softenLumaLight 是 full-frame
-// getImageData + 多次 canvas blur,拖拽会重渲染。每张 photo+cloth-presence
-// 缓存一次。
-const lumaLightMemCache = new Map<string, HTMLCanvasElement>();
 
 type LoadState = 'idle' | 'loading' | 'pose' | 'maps' | 'ready' | 'fail';
 
@@ -87,7 +47,7 @@ const BLACK_MARGIN = 0.2; // pattern pixels below this (max channel) can't darke
 // light space — it's measured on the real output, not guessed from color.
 const TARGET_CONTRAST = 0.18; // desired printed-region perceptual P90−P10
 
-export default function CanvasKitPage({ dispSource = 'depth' }: { dispSource?: DispSource } = {}) {
+export default function CanvasKitPage() {
   const [photoSrc, setPhotoSrc] = useState<string | null>(null);
   const [patternSrc, setPatternSrc] = useState<string | null>(null);
   const [hoverStage, setHoverStage] = useState(false);
@@ -213,18 +173,6 @@ export default function CanvasKitPage({ dispSource = 'depth' }: { dispSource?: D
     return [cx, cy];
   }, [scaledQuad, photoSize]);
 
-  // luma 模式专用:ImageMagick LIGHT port(FORM 圆柱阴影 + FOLD CLAHE 折叠
-  // 阴影,sigmoid+2× only-darken)→ softenLumaLight(3% blur)化掉硬黑斑。
-  const lumaSoftLight = useMemo<HTMLCanvasElement | null>(() => {
-    if (dispSource !== 'luma' || !photo || !photoSrc) return null;
-    const key = `${photoSrc}|${clothResult.cloth ? 'm' : 'n'}`;
-    const cached = lumaLightMemCache.get(key);
-    if (cached) return cached;
-    const built = softenLumaLight(buildLumaLight(photo, clothResult.cloth ?? null));
-    lumaLightMemCache.set(key, built);
-    return built;
-  }, [dispSource, photo, photoSrc, clothResult.cloth]);
-
   const depthStats = useMemo(
     () => (depthResult.depth ? sampleDepthStats(depthResult.depth, scaledQuad) : { center: 0.5, range: 0.08 }),
     [depthResult.depth, scaledQuad]
@@ -277,19 +225,12 @@ export default function CanvasKitPage({ dispSource = 'depth' }: { dispSource?: D
     () => (maps?.light ? softenLightMap(maps.light) : null),
     [maps]
   );
-  // /canvaskit-gradient 的核心替换:depth 模式用 softLight (canvaskit 原),
-  // luma 模式用 lumaSoftLight (ImageMagick LIGHT port + 重 blur) —— 这就是
-  // "复制 canvaskit 内容,褶皱用 imagemagick"的落点:fold 阴影来源从 DoG of
-  // photo (maps.light) 换成 ImageMagick CLAHE 派生的 fold-light,印图视觉上
-  // 的"褶皱暗带"换风格。下游 sampleLightStats/lightCanvas 都看 effLight,
-  // 闭环 residual 测的也是这个 light 作用后的实际印图对比,自动校准。
-  const effLight = dispSource === 'luma' ? lumaSoftLight : softLight;
-  // Normalizers 1 + 3 — measured on the SAME light map the shader reads
+  // Normalizers 1 + 3 — measured on the SOFTENED light map the shader reads
   // (consistency), cloth-gated. Recomputes on quad like shadingStats.
   const lightStats = useMemo(
-    () => (effLight ? sampleLightStats(effLight, clothResult.cloth, quad)
-                    : { spread: 0.12, confidence: 1 }),
-    [effLight, clothResult.cloth, quad]
+    () => (softLight ? sampleLightStats(softLight, clothResult.cloth, quad)
+                     : { spread: 0.12, confidence: 1 }),
+    [softLight, clothResult.cloth, quad]
   );
   // `light` slider is a scene-independent perceptual fold-contrast TARGET
   // multiplier (default 1.0), not a raw strength. Garment/pattern color is
@@ -315,13 +256,9 @@ export default function CanvasKitPage({ dispSource = 'depth' }: { dispSource?: D
   }, []);
   const getCanvas = useCallback(() => stageRef.current?.querySelector('canvas') ?? null, []);
 
-  // 两种模式都依赖 DAv2 depth(macro);luma 模式额外要 lumaSoftLight 就绪。
-  const sourceReady =
-    depthResult.state === 'ready' && !!depthResult.depth && !!depthResult.depthFine &&
-    (dispSource !== 'luma' || !!lumaSoftLight);
   const ready =
     status === 'ready' && !!photo && !!patternImg && !!photoSize && !!scaledQuad &&
-    !!maps && sourceReady;
+    !!maps && depthResult.state === 'ready' && !!depthResult.depth && !!depthResult.depthFine;
 
   const failed = status === 'fail';
   const parsing = status === 'loading' || status === 'pose' || status === 'maps';
@@ -404,7 +341,7 @@ export default function CanvasKitPage({ dispSource = 'depth' }: { dispSource?: D
                 macroCanvas={depthResult.depth!}
                 smoothCanvas={maps!.smooth}
                 shadingCanvas={maps!.shading}
-                lightCanvas={effLight ?? maps!.light}
+                lightCanvas={softLight ?? maps!.light}
                 fineCanvas={depthResult.depthFine!}
                 hairCanvas={hairResult.hair}
                 clothCanvas={clothResult.cloth}
