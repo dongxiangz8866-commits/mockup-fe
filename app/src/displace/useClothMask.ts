@@ -3,10 +3,11 @@ import { decodeCachedMap, loadCachedMap, saveCachedMap } from '../shading';
 import { segmentClothes } from './clothSegmenter';
 import { recordStage } from './perfBus';
 
-// v2: mask is now morphologically closed (boxMorph in clothSegmenter) before
-// caching — output bytes changed, so the prefix bump forces stale v1 entries
-// to be re-inferred instead of silently serving un-closed masks.
-const CLOTH_CACHE_PREFIX = 'cloth-cache:v2:';
+// v3: topological flood-fill hole-fill added after boxMorph close so chin-
+// shadow / speckle holes the kernel can't bridge get sealed (otherwise pass-1
+// DstIn punches a visible photo-color hole through the print on white shirts).
+// Output bytes change → force a re-infer on next load.
+const CLOTH_CACHE_PREFIX = 'cloth-cache:v3:';
 
 // Same three-tier pattern as useHairMask / useDepthMap: in-mem keyed by photo
 // src, then localStorage half-res JPEG, then ML inference. Mask is binary at

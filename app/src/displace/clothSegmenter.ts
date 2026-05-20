@@ -22,6 +22,34 @@ const CLOTHES_CLASS = 4;
 // not to swallow the neckline / sleeve gaps.
 const CLOSE_R = 3;
 
+// Topological hole-fill: anything unreached by a 4-connected flood from the
+// image border in the BINARY 0-field is an interior speckle/shadow hole the
+// segmenter punched into the cloth (chin-shadow misclassified as skin, small
+// speckle, etc.). Morph-close caps at its kernel radius (CLOSE_R=3 ~12 px on
+// a 1024 px photo) and misses wider holes — flood-fill is topology-based, no
+// size limit, and CANNOT grow the outer silhouette (true background remains
+// reachable from the border). Real interior cutouts that SHOULD stay 0 —
+// neck triangle, armhole gaps, hair-strands-on-chest connected to head hair —
+// are all border-reachable through the head/sides and stay 0.
+function fillInteriorHoles(bin: Uint8Array, w: number, h: number): Uint8Array {
+  const reach = new Uint8Array(w * h);
+  const stack: number[] = [];
+  const push = (i: number) => { if (bin[i] === 0 && !reach[i]) { reach[i] = 1; stack.push(i); } };
+  for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+  while (stack.length) {
+    const i = stack.pop()!;
+    const x = i % w;
+    if (x > 0) push(i - 1);
+    if (x < w - 1) push(i + 1);
+    if (i >= w) push(i - w);
+    if (i + w < w * h) push(i + w);
+  }
+  const out = new Uint8Array(w * h);
+  for (let i = 0; i < bin.length; i++) out[i] = bin[i] === 255 || !reach[i] ? 255 : 0;
+  return out;
+}
+
 // Separable box morphology on a 0/255 single-channel buffer. dilate = take the
 // neighborhood max, erode = the min. A close (dilate then erode) fills the
 // interior holes the selfie segmenter leaves on a white shirt WITHOUT growing
@@ -77,10 +105,17 @@ export async function segmentClothes(photo: HTMLImageElement): Promise<HTMLCanva
   const buf = cat.getAsUint8Array();
   cat.close();
 
-  // Binary cloth field, then morphological close to seal interior holes.
+  // Binary cloth field, then morphological close (smooths small noise at the
+  // boundary) followed by topological hole-fill (seals ANY-size interior
+  // shadow/speckle the close kernel can't bridge). Order matters: close first
+  // softens the edge so the flood-fill doesn't grab boundary pinholes that
+  // close would have sealed via dilation.
   const bin = new Uint8Array(w0 * h0);
   for (let i = 0; i < bin.length; i++) bin[i] = buf[i] === CLOTHES_CLASS ? 255 : 0;
-  const closed = boxMorph(boxMorph(bin, w0, h0, CLOSE_R, true), w0, h0, CLOSE_R, false);
+  const closed = fillInteriorHoles(
+    boxMorph(boxMorph(bin, w0, h0, CLOSE_R, true), w0, h0, CLOSE_R, false),
+    w0, h0,
+  );
 
   const tmp = document.createElement('canvas');
   tmp.width = w0;
