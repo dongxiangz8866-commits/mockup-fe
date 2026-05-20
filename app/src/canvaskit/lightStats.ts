@@ -22,7 +22,13 @@ import type { Quad } from '../shading';
 
 const GRID = 32; // 1024 ROI samples — stable percentiles, <2 ms on a bbox read
 const NB = 3; // px radius of the low-pass box (fold scale ≫ this; noise ≈ this)
-const MIN_SPREAD = 0.04;
+// Spread floor for the depth normalization in the shader. 0.04 was too low:
+// a 0.04 light dip (a small chin-shadow on a uniform-white-shirt photo) hit
+// depth=1.0, and the closed-loop boost then multiplied that into a hard dark
+// blob on white-on-white prints. 0.08 means the same dip lands at depth≈0.5
+// — folds still show on legit-creased shots (signalSpread > floor → floor
+// doesn't bind), but truly-flat scenes don't get amplified noise.
+const MIN_SPREAD = 0.08;
 const DEFAULT_SPREAD = 0.12;
 const SNR_LO = 1.2; // signal ≤ 1.2× noise ⇒ distrust (pure noise floor)
 const SNR_HI = 3.0; // signal ≥ 3× noise ⇒ full trust
@@ -41,7 +47,11 @@ export type LightStats = { spread: number; confidence: number };
 export function softenLightMap(light: HTMLCanvasElement): HTMLCanvasElement {
   const w = light.width;
   const h = light.height;
-  const r = Math.max(2, Math.round(Math.min(w, h) * 0.012));
+  // 2026-05-20: 0.012 → 0.020. User reported visible "hard" edges at fold
+  // light/dark boundaries — larger blur radius softens the band-pass artifacts
+  // upstream so the shader's depth saturation doesn't have a sharp ridge to
+  // chew on. 30–80 px folds still survive (blur ≈ 25 px on a 1280-tall photo).
+  const r = Math.max(2, Math.round(Math.min(w, h) * 0.020));
   const out = document.createElement('canvas');
   out.width = w;
   out.height = h;

@@ -39,13 +39,19 @@ const sceneMemCache = new Map<string, SceneSample>();
 // Garment/pattern color is absorbed by the shader's headroom rolloff, photo
 // lighting intensity by lightStats.spread, signal trust by .confidence —
 // see lightStats.ts. /displace keeps its own tuning (memory: only /canvaskit).
-const TARGET_K_BASE = 0.55; // deepest trusted fold darkens a bright pixel ≤55%
+// 2026-05-20: knobs lowered (0.55→0.38, 0.18→0.12) — user reported lighting
+// still felt "carried over from previous pattern" on pattern switch even with
+// FOLDK_MAX/MULT_FLOOR guards. Reducing both the base target AND the closed-
+// loop target shrinks the per-pattern residual swing (residual = target/meas
+// → smaller target → smaller meas → smaller absolute residual gap between
+// patterns) so a pattern A→B switch can't accumulate visible lighting deltas.
+const TARGET_K_BASE = 0.38; // deepest trusted fold darkens a bright pixel ≤38%
 const BLACK_MARGIN = 0.2; // pattern pixels below this (max channel) can't darken
 // Closed-loop target: CanvasKitStage measures the printed region and pulls
 // its perceptual contrast toward this fixed value. This is what makes "not
 // too strong / not too weak" hold on the un-exhaustible garment×pattern×
 // light space — it's measured on the real output, not guessed from color.
-const TARGET_CONTRAST = 0.18; // desired printed-region perceptual P90−P10
+const TARGET_CONTRAST = 0.12; // desired printed-region perceptual P90−P10
 
 export default function CanvasKitPage() {
   const [photoSrc, setPhotoSrc] = useState<string | null>(null);
@@ -366,7 +372,7 @@ export default function CanvasKitPage() {
                 foldSpread={lightStats.spread}
                 blackMargin={BLACK_MARGIN}
                 debugMode={debug}
-                renderKey={`${photoSrc ?? ''}|${patternSrc ?? ''}`}
+                renderKey={`${photoSrc ?? ''}|${patternImg?.src ?? ''}`}
               />
               {quad && (
                 <div className={`${s.handles} ${hoverStage || drag.dragging ? s.handlesShown : ''}`}>

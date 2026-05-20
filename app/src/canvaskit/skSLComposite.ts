@@ -63,8 +63,12 @@ half4 main(float2 fc) {
   float light = uLight.eval(mp).r;            // 1 = flat, 0 = deep fold
   // 归一1: z-score fold depth by the in-quad spread (sampleLightStats) so
   // "depth = 1" is the same fold on a flat tee and a deep-creased shot.
-  // depth = 0 on flat regions ⇒ print bytes unchanged (硬门, no gamma approx).
-  float depth = clamp((1.0 - light) / max(uFoldSpread, 0.02), 0.0, 1.0);
+  // 2026-05-20: clamp → smoothstep. The hard saturation at depth=1 made the
+  // border between "fading shadow" and "fully-saturated fold" a derivative
+  // discontinuity (user: 明暗交界点有点硬). smoothstep is C1 at both ends so
+  // the dark side eases into saturation; flat regions still bottom out at
+  // depth=0 exactly ⇒ no bleed onto non-fold print bytes.
+  float depth = smoothstep(0.0, max(uFoldSpread, 0.02), 1.0 - light);
 
   // Foreground occlusion — ML hair only (5-tap max, ~2 px).
   float hair = uHair.eval(mp).r;
@@ -77,13 +81,24 @@ half4 main(float2 fc) {
   // 归一2: near-black anti-crush rolloff. max(rgb) is the project's
   // perceived-darkness metric (navy: low luma, high max). A near-black
   // pattern pixel gets room→0, so the fold can NEVER crush it to black —
-  // structural, no color branch. The "white prints look dirty" problem is
-  // NOT fixed by attenuating white here (that just CUTS shading — user
-  // wants it NATURAL, not gone); it's fixed upstream by feeding a softened
-  // light map so what lands on white is a gentle gradient, not a hard
-  // bimodal body-shadow blob. uFoldK = SNR-conf × slider × residual.
+  // structural, no color branch. uFoldK = SNR-conf × slider × residual.
   float room = smoothstep(0.0, uBlackMargin, max(max(rgb.r, rgb.g), rgb.b));
-  float mult = 1.0 - depth * uFoldK * room * occl;
+  // 归一3: SOFT floor on the darkening multiplier. The light map is a DoG
+  // band-pass of the photo so it catches body-curvature shadows (chin /
+  // collarbone / breast) just as readily as real cloth folds; without a
+  // floor the closed-loop residual amplifies them into hard dark blobs on
+  // white-on-white prints. MULT_FLOOR keeps darkening bounded structurally.
+  // 2026-05-20: max(...) → smoothstep blend. A hard max creates a kink
+  // exactly where the eye notices it most (the mid-tone transition where
+  // shadow first starts to "stop deepening") — visible as a hard ridge on
+  // creased shots. The smoothstep band ±FLOOR_SOFT means the dim → floor
+  // transition is C1 continuous; the floor itself is still binding at
+  // raw < MULT_FLOOR − FLOOR_SOFT so deep folds remain bounded.
+  const float MULT_FLOOR = 0.82;
+  const float FLOOR_SOFT = 0.08;
+  float raw = 1.0 - depth * uFoldK * room * occl;
+  float w = smoothstep(MULT_FLOOR - FLOOR_SOFT, MULT_FLOOR + FLOOR_SOFT, raw);
+  float mult = mix(MULT_FLOOR, raw, w);
   half3 printed = rgb * mix(1.0, mult, pa);
   half3 comp = mix(photoCol, printed, pa * occl);
 

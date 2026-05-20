@@ -14,6 +14,13 @@ import { measurePrintedContrast, renderCanvasKit } from './renderCanvasKit';
 const MAX_DIM = 1800; // backing-store cap (DAv2 maps are ~518 upsampled)
 const K_RES_MIN = 0.2; // closed-loop residual clamp (foldK pull-down floor)
 const K_RES_MAX = 2.5; // … and boost ceiling for genuinely-flat cloth
+// Hard ceiling on the EFFECTIVE foldK reaching the shader. 2026-05-20:
+// lowered 0.85 → 0.55 alongside the TARGET_K_BASE/TARGET_CONTRAST cuts in
+// CanvasKitPage — the goal is "tune down the lighting algorithm's overall
+// influence" so cross-pattern visual drift becomes invisible. The closed
+// loop can still pull DOWN below this on legitimately deep folds; it just
+// can't boost a flat-shirt noise dip into a visible blob.
+const FOLDK_MAX = 0.55;
 const DBG: Record<DebugMode, number> = {
   composite: 0, displace: 1, light: 2, shading: 3,
   fine: 4, foldGrad: 5, cloth: 6, smoothField: 7,
@@ -141,8 +148,9 @@ export default function CanvasKitStage(p: Props) {
         },
       });
 
+    const cap = (k: number) => Math.min(FOLDK_MAX, k);
     const cached = residualRef.current.key === p.renderKey;
-    renderWith(p.foldKBase * (cached ? residualRef.current.r : 1));
+    renderWith(cap(p.foldKBase * (cached ? residualRef.current.r : 1)));
 
     // First render of a new photo|pattern: measure the printed region and
     // re-render ONCE with the corrected residual — synchronously, same tick,
@@ -156,9 +164,9 @@ export default function CanvasKitStage(p: Props) {
           : 1;
       residualRef.current = { key: p.renderKey, r };
       if (import.meta.env.DEV) {
-        console.log(`[foldCalib] measured=${m.toFixed(3)} → residual=${r.toFixed(2)}`);
+        console.log(`[foldCalib] measured=${m.toFixed(3)} → residual=${r.toFixed(2)} → foldK=${cap(p.foldKBase * r).toFixed(2)}`);
       }
-      if (Math.abs(r - 1) > 0.02) renderWith(p.foldKBase * r);
+      if (Math.abs(r - 1) > 0.02) renderWith(cap(p.foldKBase * r));
     }
     if (pendingSince.current != null) {
       recordPrint(performance.now() - pendingSince.current);

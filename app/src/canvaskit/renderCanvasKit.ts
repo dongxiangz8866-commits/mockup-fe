@@ -78,8 +78,14 @@ export function renderCanvasKit(a: RenderArgs): void {
   oc.clear(ck.TRANSPARENT);
   oc.save();
   oc.scale(a.surfaceScale, a.surfaceScale); // mesh positions are photo px
+  // MipmapMode.Linear so the pattern minifies cleanly when the warp at high
+  // depthWrap squeezes the pattern texels denser than 1 src-px per dst-px.
+  // Without trilinear, those regions alias into a jagged shimmer that the
+  // eye reads as "hard lines around the conformed area" (user 2026-05-20).
+  // Decal still kills sampling outside [0,1] so the cloth-clip path is
+  // unchanged. Skia generates the mip chain lazily on first sample.
   const patShader = a.patternImg.makeShaderOptions(
-    ck.TileMode.Decal, ck.TileMode.Decal, ck.FilterMode.Linear, ck.MipmapMode.None
+    ck.TileMode.Decal, ck.TileMode.Decal, ck.FilterMode.Linear, ck.MipmapMode.Linear
   );
   const patPaint = new ck.Paint();
   patPaint.setShader(patShader);
